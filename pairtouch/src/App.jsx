@@ -2,13 +2,12 @@
 
 import React, { useEffect, useState } from "react";
 import { doc, setDoc, getDoc, onSnapshot } from "firebase/firestore";
-import { auth, googleProvider, db, messaging } from "./firebase";
+import { auth, googleProvider, db } from "./firebase";
 import {
   signInWithPopup,
   onAuthStateChanged,
   signOut,
 } from "firebase/auth";
-import { getToken } from "firebase/messaging";
 
 function App() {
   const [user, setUser] = useState(null);
@@ -25,7 +24,6 @@ function App() {
   const [partnerMood, setPartnerMood] = useState(null);
   const [partnerName, setPartnerName] = useState("");
   const [partnerLastOpenedAt, setPartnerLastOpenedAt] = useState(null);
-  const [partnerWeather, setPartnerWeather] = useState(null); // 相手の天気
 
   // 位置情報
   const [myLocation, setMyLocation] = useState(null); // { lat, lng }
@@ -37,19 +35,15 @@ function App() {
   // 🧭 コンパス用：方位角（0〜360度）
   const [bearingDeg, setBearingDeg] = useState(null);
 
-  // 通知の状態メッセージ
-  const [notifyStatus, setNotifyStatus] = useState("");
-
-  // Web Push (FCM) の公開 VAPID キー
-  const VAPID_PUBLIC_KEY =
-    "BJiOsiIH9N8Bpo4CfOlnH-lR_RMWT9ei8FNG8EuApjTg-33IAd0ondpiMVZvuy7M0eYA-XpGpefcaK1FPWorCuc";
-
+  // =========================
   // ログイン状態の監視
+  // =========================
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (firebaseUser) => {
       (async () => {
         try {
           if (!firebaseUser) {
+            console.log("auth: ログアウト状態");
             setUser(null);
             setCurrentMood(null);
             setPairId(null);
@@ -57,7 +51,6 @@ function App() {
             setPartnerMood(null);
             setPartnerName("");
             setPartnerLastOpenedAt(null);
-            setPartnerWeather(null);
             setMyLocation(null);
             setPartnerLocation(null);
             setDistanceKm(null);
@@ -69,6 +62,7 @@ function App() {
             return;
           }
 
+          console.log("auth: ログイン user.uid =", firebaseUser.uid);
           setUser(firebaseUser);
 
           const userRef = doc(db, "users", firebaseUser.uid);
@@ -140,6 +134,9 @@ function App() {
     return () => unsub();
   }, []);
 
+  // =========================
+  // ログイン / ログアウト
+  // =========================
   const handleSignIn = async () => {
     try {
       await signInWithPopup(auth, googleProvider);
@@ -153,7 +150,9 @@ function App() {
     await signOut(auth);
   };
 
-  // 調子アイコンを押したとき（自分）
+  // =========================
+  // 自分の調子
+  // =========================
   const handleMoodClick = async (moodCode) => {
     if (!user) return;
     setCurrentMood(moodCode); // 先に画面だけ反映
@@ -171,7 +170,9 @@ function App() {
     }
   };
 
-  // 招待コードを作成（自分がオーナーになる）※ UI を先に更新する“楽観的”版
+  // =========================
+  // 招待コードを作成（自分がオーナー）
+  // =========================
   const handleCreateInvite = async () => {
     if (!user) return;
 
@@ -183,7 +184,7 @@ function App() {
     // 6桁のランダムコード（簡易）
     const code = String(Math.floor(100000 + Math.random() * 900000));
 
-    // 🔸 先に UI 側だけ更新（Firestore が offline でもとりあえず画面には出す）
+    // 🔵 ここで一旦 UI だけ先に更新（楽観的）
     setPairId(code);
     setPairStatusMessage(
       "招待コードを作成しました。このコードを相手に伝えてください。"
@@ -208,15 +209,19 @@ function App() {
         { pairId: code },
         { merge: true }
       );
+
+      console.log("招待コード作成 OK:", code);
     } catch (e) {
       console.error("招待コード作成でエラー:", e);
       setPairStatusMessage(
-        "招待コードは画面に表示しましたが、サーバへの保存に失敗しました。（ネットワークを確認して、あとで開き直してみてください）"
+        "招待コードは画面に表示しましたが、サーバへの保存に失敗しました。ネットワークを確認して、あとで開き直してみてください。"
       );
     }
   };
 
-  // 相手から教えてもらった招待コードでペアに参加
+  // =========================
+  // 招待コードでペアに参加
+  // =========================
   const handleJoinPair = async () => {
     if (!user) return;
     if (!joinCodeInput.trim()) {
@@ -271,6 +276,7 @@ function App() {
       setPairId(code);
       setPairStatusMessage("ペアがつながりました。");
       setJoinCodeInput("");
+      console.log("ペア参加 OK:", code);
     } catch (e) {
       console.error("ペア参加でエラー:", e);
       alert("ペアの参加に失敗しました");
@@ -278,17 +284,14 @@ function App() {
   };
 
   // =========================
-  // ここから「相手の情報」＋「開いたとき通知」
+  // pairId -> pairs/{pairId} を監視して partnerUid を決定
   // =========================
-
-  // pairId が決まったら、pairs/{pairId} を監視して相手の uid を特定
   useEffect(() => {
     if (!user || !pairId) {
       setPartnerUid(null);
       setPartnerMood(null);
       setPartnerName("");
       setPartnerLastOpenedAt(null);
-      setPartnerWeather(null);
       setPartnerLocation(null);
       return;
     }
@@ -300,7 +303,6 @@ function App() {
         setPartnerMood(null);
         setPartnerName("");
         setPartnerLastOpenedAt(null);
-        setPartnerWeather(null);
         setPartnerLocation(null);
         return;
       }
@@ -313,7 +315,6 @@ function App() {
         setPartnerMood(null);
         setPartnerName("");
         setPartnerLastOpenedAt(null);
-        setPartnerWeather(null);
         setPartnerLocation(null);
         return;
       }
@@ -324,86 +325,84 @@ function App() {
     return () => unsub();
   }, [user, pairId]);
 
-  // 相手がアプリを開いたら通知を出す（ブラウザが開いているとき用）
-  const notifyPartnerOpened = (name) => {
-    if (typeof window === "undefined") return;
-    if (!("Notification" in window)) return;
-
-    const title = "pair touch";
-    const body = `${name} が pair touch をひらきました。`;
-
-    if (Notification.permission === "granted") {
-      new Notification(title, { body });
-    } else if (Notification.permission === "default") {
-      Notification.requestPermission().then((perm) => {
-        if (perm === "granted") {
-          new Notification(title, { body });
-        }
-      });
-    }
-    // "denied" のときは何もしない
-  };
-
+  // =========================
   // partnerUid が決まったら、users/{partnerUid} をリアルタイム購読
+  // =========================
   useEffect(() => {
     if (!partnerUid) {
+      console.log("partnerUid なし -> パートナー情報リセット");
       setPartnerMood(null);
       setPartnerName("");
       setPartnerLastOpenedAt(null);
-      setPartnerWeather(null);
       setPartnerLocation(null);
       return;
     }
 
+    console.log("partnerUid が設定されました:", partnerUid);
+
     const partnerRef = doc(db, "users", partnerUid);
-    const unsub = onSnapshot(partnerRef, (snap) => {
-      if (!snap.exists()) {
-        setPartnerMood(null);
-        setPartnerName("");
-        setPartnerLastOpenedAt(null);
-        setPartnerWeather(null);
-        setPartnerLocation(null);
-        return;
-      }
-      const data = snap.data();
-      setPartnerMood(data.iconMoodToday ?? null);
-      setPartnerName(data.displayName ?? "");
-
-      const ts = data.lastOpenedAt;
-      let newOpened = null;
-      if (ts && typeof ts.toDate === "function") {
-        newOpened = ts.toDate();
-      }
-
-      setPartnerLastOpenedAt((prev) => {
-        // 初回代入のときは通知を出さない（うるさいので）
-        if (prev && newOpened && newOpened.getTime() !== prev.getTime()) {
-          notifyPartnerOpened(data.displayName || "相手");
+    const unsub = onSnapshot(
+      partnerRef,
+      (snap) => {
+        if (!snap.exists()) {
+          console.log("partnerRef snap: ドキュメントが存在しません");
+          setPartnerMood(null);
+          setPartnerName("");
+          setPartnerLastOpenedAt(null);
+          setPartnerLocation(null);
+          return;
         }
-        return newOpened || prev || null;
-      });
+        const data = snap.data();
+        console.log("partnerRef snap data:", data);
 
-      // 相手の位置情報
-      if (
-        data.location &&
-        typeof data.location.lat === "number" &&
-        typeof data.location.lng === "number"
-      ) {
-        setPartnerLocation({
-          lat: data.location.lat,
-          lng: data.location.lng,
+        setPartnerMood(data.iconMoodToday ?? null);
+        setPartnerName(data.displayName ?? "");
+
+        const ts = data.lastOpenedAt;
+        let newOpened = null;
+        if (ts && typeof ts.toDate === "function") {
+          newOpened = ts.toDate();
+        }
+
+        setPartnerLastOpenedAt((prev) => {
+          // 初回代入のときは通知を出さない（うるさいので）
+          if (prev && newOpened && newOpened.getTime() !== prev.getTime()) {
+            // ここはローカル通知だけ（ブラウザ通知）
+            if (typeof window !== "undefined" && "Notification" in window) {
+              const title = "pair touch";
+              const body = `${data.displayName || "相手"} が pair touch をひらきました。`;
+              if (Notification.permission === "granted") {
+                new Notification(title, { body });
+              }
+            }
+          }
+          return newOpened || prev || null;
         });
-      } else {
-        setPartnerLocation(null);
-      }
 
-      // 相手の天気情報
-      if (data.weather) {
-        setPartnerWeather(data.weather);
-      } else {
-        setPartnerWeather(null);
+        // 相手の位置情報
+        if (
+          data.location &&
+          typeof data.location.lat === "number" &&
+          typeof data.location.lng === "number"
+        ) {
+          console.log(
+            "partner location 更新:",
+            data.location.lat,
+            data.location.lng
+          );
+          setPartnerLocation({
+            lat: data.location.lat,
+            lng: data.location.lng,
+          });
+        } else {
+          console.log("partner location が未設定 or 不正:", data.location);
+          setPartnerLocation(null);
+        }
+      },
+      (err) => {
+        console.error("partnerRef onSnapshot エラー:", err);
       }
-    });
+    );
 
     return () => unsub();
   }, [partnerUid]);
@@ -411,7 +410,6 @@ function App() {
   // =========================
   // 位置情報の取得と距離・方角の計算
   // =========================
-
   const handleUpdateMyLocation = () => {
     if (!user) return;
 
@@ -465,68 +463,10 @@ function App() {
   };
 
   // =========================
-  // 通知（Web Push）の有効化
+  // 計算系（距離・方位角）
   // =========================
-
-  const handleEnableNotifications = async () => {
-    if (!user) {
-      setNotifyStatus("ログインしてから通知を有効にしてください。");
-      return;
-    }
-
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      setNotifyStatus("このブラウザは通知に対応していません。");
-      return;
-    }
-
-    if (!messaging) {
-      setNotifyStatus("通知機能の初期化に失敗しました。");
-      return;
-    }
-
-    const perm = await Notification.requestPermission();
-    if (perm !== "granted") {
-      setNotifyStatus("通知が許可されませんでした。");
-      return;
-    }
-
-    try {
-      const token = await getToken(messaging, {
-        vapidKey: VAPID_PUBLIC_KEY,
-      });
-
-      if (!token) {
-        setNotifyStatus("通知トークンを取得できませんでした。");
-        return;
-      }
-
-      const userRef = doc(db, "users", user.uid);
-      await setDoc(
-        userRef,
-        {
-          fcmTokens: {
-            [token]: true,
-          },
-        },
-        { merge: true }
-      );
-
-      setNotifyStatus("通知を有効にしました。");
-      console.log("FCM token:", token);
-    } catch (e) {
-      console.error("FCM トークン取得エラー:", e);
-      setNotifyStatus("通知の設定に失敗しました。");
-    }
-  };
-
-  // =========================
-  // 計算系
-  // =========================
-
-  // ラジアン変換
   const toRad = (deg) => (deg * Math.PI) / 180;
 
-  // ハーバサインで距離計算（km）
   const calcDistanceKm = (loc1, loc2) => {
     const R = 6371; // 地球半径 km
     const dLat = toRad(loc2.lat - loc1.lat);
@@ -542,7 +482,6 @@ function App() {
     return R * c;
   };
 
-  // 方位角（度）
   const calcBearingDeg = (loc1, loc2) => {
     const lat1 = toRad(loc1.lat);
     const lat2 = toRad(loc2.lat);
@@ -557,14 +496,12 @@ function App() {
     return (brng + 360) % 360; // 0〜360
   };
 
-  // 方角ラベル（8方位）
   const bearingToLabel = (deg) => {
     const dirs = ["北", "北東", "東", "南東", "南", "南西", "西", "北西", "北"];
     const idx = Math.round(deg / 45);
     return dirs[idx];
   };
 
-  // 距離 & 方角を計算
   useEffect(() => {
     if (!myLocation || !partnerLocation) {
       setDistanceKm(null);
@@ -582,6 +519,9 @@ function App() {
     setBearingDeg(b);
   }, [myLocation, partnerLocation]);
 
+  // =========================
+  // 表示用
+  // =========================
   const renderMoodEmoji = (mood) => {
     switch (mood) {
       case "good":
@@ -600,7 +540,6 @@ function App() {
   const formatDistanceText = (km) => {
     if (km == null) return "";
     if (km < 0.05) {
-      // 50m 未満
       return "すぐ近く";
     } else if (km < 1) {
       return `${Math.round(km * 1000)} m`;
@@ -611,47 +550,13 @@ function App() {
     }
   };
 
-  // 相手の天気から背景テーマを決定
-  const getWeatherThemeClass = (weather) => {
-    if (!weather) {
-      return "app-root app-theme-default";
-    }
-
-    const { condition, isDaytime } = weather;
-    const day = isDaytime === false ? "night" : "day";
-
-    if (condition === "clear") {
-      return day === "day"
-        ? "app-root app-theme-clear-day"
-        : "app-root app-theme-clear-night";
-    }
-
-    if (condition === "cloudy") {
-      return day === "day"
-        ? "app-root app-theme-cloudy-day"
-        : "app-root app-theme-cloudy-night";
-    }
-
-    if (condition === "rain") {
-      return day === "day"
-        ? "app-root app-theme-rain-day"
-        : "app-root app-theme-rain-night";
-    }
-
-    if (condition === "snow") {
-      return "app-root app-theme-snow";
-    }
-
-    return "app-root app-theme-default";
-  };
-
   if (loading) {
-    return <div className={getWeatherThemeClass(partnerWeather)}>読み込み中...</div>;
+    return <div className="app-root">読み込み中...</div>;
   }
 
   if (!user) {
     return (
-      <div className={getWeatherThemeClass(partnerWeather)}>
+      <div className="app-root">
         <h1>pair touch</h1>
         <p>
           会話する余裕がないときでも、相手の気配と距離をそっと感じるための小さなアプリ。
@@ -661,9 +566,8 @@ function App() {
     );
   }
 
-  // ログイン後
   return (
-    <div className={getWeatherThemeClass(partnerWeather)}>
+    <div className="app-root">
       <header className="app-header">
         <div>
           <h1>pair touch</h1>
@@ -719,28 +623,6 @@ function App() {
               {pairStatusMessage}
             </p>
           )}
-
-          {/* 通知オン（実験用） */}
-          <div
-            style={{
-              marginTop: "16px",
-              paddingTop: "8px",
-              borderTop: "1px solid #eee",
-            }}
-          >
-            <p style={{ fontSize: "13px" }}>
-              1日1回くらい、pair touch をひらくように小さくお知らせします。
-              （あとで時間なども選べるようにしていく予定）
-            </p>
-            <button onClick={handleEnableNotifications}>
-              通知をオンにする（実験）
-            </button>
-            {notifyStatus && (
-              <p style={{ marginTop: "8px", fontSize: "12px" }}>
-                {notifyStatus}
-              </p>
-            )}
-          </div>
         </section>
 
         {/* 距離と方角 */}
@@ -765,6 +647,21 @@ function App() {
             </p>
           )}
 
+          {myLocation && (
+            <p style={{ marginTop: "8px", fontSize: "12px", opacity: 0.8 }}>
+              自分の位置（debug）:
+              lat {myLocation.lat.toFixed(5)}, lng {myLocation.lng.toFixed(5)}
+            </p>
+          )}
+
+          {partnerLocation && (
+            <p style={{ marginTop: "4px", fontSize: "12px", opacity: 0.8 }}>
+              相手の位置（debug）:
+              lat {partnerLocation.lat.toFixed(5)}, lng{" "}
+              {partnerLocation.lng.toFixed(5)}
+            </p>
+          )}
+
           {pairId && myLocation && partnerLocation && (
             <div style={{ marginTop: "12px" }}>
               <p>
@@ -783,7 +680,6 @@ function App() {
                 ※ざっくりとした目安です。正確な位置情報の共有は行いません。
               </p>
 
-              {/* デバッグ用：距離の生値 */}
               <p style={{ fontSize: 10, opacity: 0.6, marginTop: "4px" }}>
                 debug: distanceKm ={" "}
                 {distanceKm != null ? distanceKm.toFixed(3) : "null"}
@@ -795,7 +691,6 @@ function App() {
           {pairId && myLocation && partnerLocation && (
             <div className="compass-wrapper">
               <div className="compass-circle">
-                {/* デバッグ用：角度を文字で出す */}
                 <div
                   style={{
                     position: "absolute",
@@ -809,7 +704,6 @@ function App() {
                   bearing: {bearingDeg != null ? bearingDeg.toFixed(1) : "null"}
                 </div>
 
-                {/* コンパスの針（bearingDeg が null のときは 0 度扱い） */}
                 <div
                   className="compass-needle"
                   style={{
@@ -817,9 +711,7 @@ function App() {
                   }}
                 />
 
-                {/* 中心の点 */}
                 <div className="compass-center-dot" />
-                {/* Nマーク（固定） */}
                 <div className="compass-n-label">N</div>
               </div>
             </div>

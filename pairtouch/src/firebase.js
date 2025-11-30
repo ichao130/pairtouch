@@ -2,9 +2,7 @@
 
 import { initializeApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
-// ★ポイント：initializeFirestore を使う
-import { initializeFirestore } from "firebase/firestore";
-import { getMessaging, isSupported } from "firebase/messaging";
+import { getFirestore } from "firebase/firestore";
 
 // あなたの Firebase 設定
 const firebaseConfig = {
@@ -19,22 +17,11 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-// 🔵 ここが今回のコア：WebSocket や WebChannel がダメな環境でも動くように、
-//     Firestore を「ロングポーリング」に強制する
-const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true,
-  useFetchStreams: false,
-});
-
 // 認証
 const auth = getAuth(app);
 const googleProvider = new GoogleAuthProvider();
 
-// FCM（ブラウザが対応しているときだけ）
-let messaging = null;
-if (await isSupported()) {
-  messaging = getMessaging(app);
-}
+// Firestore
+const db = getFirestore(app);
 
-// 他のファイルで使うために export
-export { app, db, auth, googleProvider, messaging };
+export { app, auth, googleProvider, db };

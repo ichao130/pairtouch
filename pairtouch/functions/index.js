@@ -1,205 +1,130 @@
 // functions/index.js
 
-const admin = require("firebase-admin");
-
-// v2 Firestore & Scheduler
-const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
-const logger = require("firebase-functions/logger");
-
+const admin = require("firebase-admin");
 const axios = require("axios");
 
-// --- 環境変数から OpenWeather API キーを読む ---
-// 事前に `firebase functions:secrets:set OPENWEATHER_API_KEY` を実行しておく前提
-const { defineSecret } = require("firebase-functions/params");
-const OPENWEATHER_API_KEY = defineSecret("OPENWEATHER_API_KEY");
-
-// Admin SDK 初期化
+// Firebase Admin の初期化（Auth / Messaging 用だけに使う）
 admin.initializeApp();
-const db = admin.firestore();
-const messaging = admin.messaging();
 
-/**
- * 位置情報が変わったときに OpenWeather から天気を取得して
- * users/{uid}.weather に保存する
- */
-exports.updateWeatherOnLocationChange = onDocumentWritten(
-  {
-    document: "users/{userId}",
-    secrets: [OPENWEATHER_API_KEY],
-    region: "us-central1",
-  },
-  async (event) => {
-    const userId = event.params.userId;
+// あなたのプロジェクト ID と Firestore データベース ID
+const PROJECT_ID =
+  process.env.GCLOUD_PROJECT ||
+  process.env.GCP_PROJECT ||
+  "pairtouch-61a68"; // 念のためデフォルトを指定
+const DATABASE_ID = "pairtouch01";
 
-    const beforeData = event.data.before.exists ? event.data.before.data() : null;
-    const afterData = event.data.after.exists ? event.data.after.data() : null;
+// Firestore REST API のベース URL
+// ※ここで (default) ではなく pairtouch01 を使う
+const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/${DATABASE_ID}/documents`;
 
-    if (!afterData) {
-      logger.log(`User ${userId} document deleted. Skip weather update.`);
-      return;
-    }
+// ===============================
+// 1日1回のリマインド通知を送る Function
+// ===============================
 
-    const prevLoc = beforeData?.location || null;
-    const newLoc = afterData.location || null;
-
-    // 位置情報がない場合はスキップ
-    if (!newLoc || typeof newLoc.lat !== "number" || typeof newLoc.lng !== "number") {
-      logger.log(`User ${userId} has no valid location. Skip weather update.`);
-      return;
-    }
-
-    // 位置が変わっていなければスキップ（ゆるめ）
-    if (
-      prevLoc &&
-      typeof prevLoc.lat === "number" &&
-      typeof prevLoc.lng === "number"
-    ) {
-      const diffLat = Math.abs(prevLoc.lat - newLoc.lat);
-      const diffLng = Math.abs(prevLoc.lng - newLoc.lng);
-      if (diffLat < 0.001 && diffLng < 0.001) {
-        logger.log(`User ${userId} location not changed enough. Skip weather update.`);
-        return;
-      }
-    }
-
-    const apiKey = OPENWEATHER_API_KEY.value();
-    if (!apiKey) {
-      logger.error("OPENWEATHER_API_KEY is not set.");
-      return;
-    }
-
-    try {
-      const url = "https://api.openweathermap.org/data/2.5/weather";
-      const params = {
-        lat: newLoc.lat,
-        lon: newLoc.lng,
-        appid: apiKey,
-        units: "metric",
-        lang: "ja",
-      };
-
-      const res = await axios.get(url, { params });
-      const w = res.data;
-
-      // シンプルな形に整形
-      const weatherData = {
-        raw: {
-          id: w.weather?.[0]?.id ?? null,
-          main: w.weather?.[0]?.main ?? null,
-          description: w.weather?.[0]?.description ?? null,
-        },
-        temp: typeof w.main?.temp === "number" ? w.main.temp : null,
-        isDaytime:
-          typeof w.dt === "number" &&
-          typeof w.sys?.sunrise === "number" &&
-          typeof w.sys?.sunset === "number"
-            ? w.dt >= w.sys.sunrise && w.dt <= w.sys.sunset
-            : null,
-        // 簡易カテゴリー
-        condition: (() => {
-          const main = (w.weather?.[0]?.main || "").toLowerCase();
-          if (main.includes("rain") || main.includes("drizzle") || main.includes("thunder")) {
-            return "rain";
-          }
-          if (main.includes("snow")) {
-            return "snow";
-          }
-          if (main.includes("cloud")) {
-            return "cloudy";
-          }
-          if (main.includes("clear")) {
-            return "clear";
-          }
-          return "other";
-        })(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      };
-
-      await db.collection("users").doc(userId).set(
-        {
-          weather: weatherData,
-        },
-        { merge: true }
-      );
-
-      logger.log(`Weather updated for user ${userId}`);
-    } catch (err) {
-      logger.error("Failed to fetch or save weather for user:", userId, err);
-    }
-  }
-);
-
-/**
- * 1日1回、pair touch をそっと開くようにリマインドする通知を送る
- *
- * - Asia/Tokyo の 20:00 に実行（必要なら時間は後で変えられる）
- * - users コレクションをざっと見て、fcmTokens を持っているユーザーに通知
- */
 exports.sendDailyReminder = onSchedule(
   {
-    schedule: "0 20 * * *",      // 毎日 20:00
+    schedule: "0 21 * * *", // 日本時間 21:00（必要なら変えてOK）
     timeZone: "Asia/Tokyo",
     region: "us-central1",
   },
   async (event) => {
-    logger.log("Running daily reminder job...");
+    console.log("sendDailyReminder started");
 
-    const snapshot = await db.collection("users").get();
-    const messages = [];
+    try {
+      // Firestore REST API で users コレクションを検索
+      // fcmTokens フィールドを持っているユーザーだけを取得するクエリ
+      const url = `${FIRESTORE_BASE_URL}:runQuery`;
 
-    snapshot.forEach((docSnap) => {
-      const data = docSnap.data();
-      const tokensMap = data.fcmTokens || {};
-      const tokens = Object.keys(tokensMap).filter((t) => !!t);
+      const body = {
+        structuredQuery: {
+          from: [{ collectionId: "users" }],
+          // where: fcmTokens が存在する（null ではない）ドキュメント
+          where: {
+            fieldFilter: {
+              field: { fieldPath: "fcmTokens" },
+              op: "IS_NOT_NULL",
+              value: { mapValue: {} },
+            },
+          },
+        },
+      };
 
-      if (!tokens.length) {
+      const response = await axios.post(url, body);
+      const results = response.data || [];
+
+      const tokens = [];
+
+      // runQuery のレスポンスをパースして FCM トークン一覧を作る
+      for (const row of results) {
+        if (!row.document) continue;
+        const doc = row.document;
+        const fields = doc.fields || {};
+
+        // fcmTokens は map 型で { tokenString: true } という形で保存している想定
+        const map = fields.fcmTokens && fields.fcmTokens.mapValue;
+        if (!map || !map.fields) continue;
+
+        for (const tokenStr of Object.keys(map.fields)) {
+          tokens.push(tokenStr);
+        }
+      }
+
+      console.log("Collected FCM tokens:", tokens.length);
+
+      if (tokens.length === 0) {
+        console.log("No FCM tokens found. Skipping send.");
         return;
       }
 
-      // ここで「最近開いてなさそうな人だけに送る」などのロジックも足せる
-      tokens.forEach((token) => {
-        messages.push({
-          token,
-          notification: {
-            title: "pair touch",
-            body: "きょうも、相手の気配をちょっとだけのぞいてみませんか？",
-          },
-          data: {
-            type: "daily_reminder",
-          },
+      const messaging = admin.messaging();
+
+      const payload = {
+        notification: {
+          title: "pair touch",
+          body: "今日も少しだけ、相手のことを思い出してみませんか？",
+        },
+      };
+
+      // FCM のマルチキャストは一度に 500 件までが推奨なので分割
+      const chunkSize = 500;
+      for (let i = 0; i < tokens.length; i += chunkSize) {
+        const chunk = tokens.slice(i, i + chunkSize);
+        const res = await messaging.sendEachForMulticast({
+          ...payload,
+          tokens: chunk,
         });
-      });
-    });
 
-    if (!messages.length) {
-      logger.log("No FCM tokens found. Skipping send.");
-      return;
-    }
-
-    logger.log(`Sending ${messages.length} reminder messages...`);
-
-    // FCM の制限に合わせて 500 件ずつ送る
-    const chunkSize = 500;
-    for (let i = 0; i < messages.length; i += chunkSize) {
-      const batch = messages.slice(i, i + chunkSize);
-      try {
-        const res = await messaging.sendAll(batch);
-        logger.log(
-          `Batch ${i / chunkSize + 1}: success=${res.successCount}, failure=${res.failureCount}`
+        console.log(
+          `Sent notifications to ${chunk.length} tokens: success=${res.successCount}, failure=${res.failureCount}`
         );
+
         if (res.failureCount > 0) {
           res.responses.forEach((r, idx) => {
             if (!r.success) {
-              logger.warn("Failed message", batch[idx].token, r.error);
+              console.warn(
+                `Token[${i + idx}] error:`,
+                r.error && r.error.code,
+                r.error && r.error.message
+              );
             }
           });
         }
-      } catch (err) {
-        logger.error("Error sending FCM batch:", err);
       }
-    }
 
-    logger.log("Daily reminder job finished.");
+      console.log("sendDailyReminder finished");
+    } catch (err) {
+      console.error("sendDailyReminder error:", err);
+      throw err;
+    }
   }
 );
+
+// ===============================
+// ※ 補足
+// ここには Firestore トリガー（onDocumentWritten など）は
+// いったん置いていません。
+// それらはデフォルト DB (default) に依存しがちで
+// 今回の 404 の原因になっているので、
+// まずは「スケジュール通知だけ確実に動く」形にしています。
+// ===============================
