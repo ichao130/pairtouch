@@ -21,6 +21,3 @@ export const googleProvider = new GoogleAuthProvider();
 
 // ★ ここがポイント：第二引数に "pairtouch01"
 export const db = getFirestore(app, "pairtouch01");
-
-
-

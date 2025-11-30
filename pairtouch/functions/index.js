@@ -23,7 +23,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
   {
     document: "users/{uid}",
     database: "pairtouch01",   // ← named DB 指定
-    region: "us-central1"
+    region: "us-central1",
   },
   async (event) => {
     const uid = event.params.uid;
@@ -71,28 +71,55 @@ exports.locationWeatherUpdater = onDocumentWritten(
       `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}` +
       `&appid=${OPENWEATHER_KEY}&units=metric&lang=ja`;
 
-    logger.info("Calling OpenWeather", { uid, lat, lon });
+    logger.info("Calling OpenWeather", { uid, lat, lon, url });
 
+    // =========================
+    // ★ 生テキスト→JSON.parse 方式に変更
+    // =========================
     let json;
     try {
-      // Node.js 20 なので fetch がそのまま使える
       const res = await fetch(url);
+
+      // まず生のレスポンス文字列を取得
+      const rawText = await res.text();
+
+      logger.info("OpenWeather raw response (head 200)", {
+        uid,
+        head: rawText.slice(0, 200),
+      });
+
       if (!res.ok) {
-        logger.error("OpenWeather API error", { status: res.status, uid });
+        logger.error("OpenWeather API error", {
+          uid,
+          status: res.status,
+          head: rawText.slice(0, 200),
+        });
+        // HTML エラーページなどが返ってきていると JSON として読めないのでここで終了
         return;
       }
-      json = await res.json();
+
+      try {
+        json = JSON.parse(rawText);
+      } catch (parseErr) {
+        logger.error("OpenWeather JSON parse error", {
+          uid,
+          error: parseErr.toString(),
+          head500: rawText.slice(0, 500),
+        });
+        return;
+      }
     } catch (e) {
       logger.error("Failed to call OpenWeather", {
         uid,
-        error: e.toString()
+        error: e.toString(),
       });
       return;
     }
 
     const weatherArray = json.weather || [];
-    const main = weatherArray[0]?.main || "Unknown";   // "Clear" / "Clouds" / ...
-    const tempC = typeof json.main?.temp === "number" ? json.main.temp : null;
+    const main = weatherArray[0]?.main || "Unknown"; // "Clear" / "Clouds" / ...
+    const tempC =
+      typeof json.main?.temp === "number" ? json.main.temp : null;
     const icon = weatherArray[0]?.icon || null;
 
     // 昼 / 夜の判定（UTC 秒基準）
@@ -111,7 +138,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
 
     // condition をざっくりカテゴリ化
     let condition = "unknown";
-    const mainLower = main.toLowerCase();
+    const mainLower = (main || "").toLowerCase();
     if (mainLower.includes("clear")) {
       condition = "clear";
     } else if (mainLower.includes("cloud")) {
@@ -125,12 +152,12 @@ exports.locationWeatherUpdater = onDocumentWritten(
     }
 
     const weatherData = {
-      condition,          // "clear" | "cloudy" | "rain" | "storm" | "snow" | "unknown"
-      isDaytime,          // true | false | null
-      tempC,              // 気温（℃）
-      icon,               // OpenWeather のアイコンコード（例: "01d"）
-      rawMain: main,      // デバッグ用
-      updatedAt: FieldValue.serverTimestamp()
+      condition,      // "clear" | "cloudy" | "rain" | "storm" | "snow" | "unknown"
+      isDaytime,      // true | false | null
+      tempC,          // 気温（℃）
+      icon,           // OpenWeather のアイコンコード（例: "01d"）
+      rawMain: main,  // デバッグ用
+      updatedAt: FieldValue.serverTimestamp(),
     };
 
     logger.info("Saving weather to Firestore", { uid, weatherData });

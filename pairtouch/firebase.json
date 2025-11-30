@@ -1,4 +1,9 @@
 {
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json",
+    "databaseId": "pairtouch01"
+  },
   "functions": [
     {
       "source": "functions",
