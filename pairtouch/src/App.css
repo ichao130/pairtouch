@@ -41,3 +41,51 @@
   color: #888;
 }
 
+.app-root {
+  min-height: 100vh;
+  transition: background 0.8s ease, color 0.8s ease;
+}
+
+/* デフォルト（まだ天気が取れてないとき） */
+.app-theme-default {
+  background: linear-gradient(160deg, #f6f6f9, #e3f0ff);
+}
+
+/* 晴れ（昼） */
+.app-theme-clear-day {
+  background: radial-gradient(circle at top, #ffe9a3, #87cefa);
+}
+
+/* 晴れ（夜） */
+.app-theme-clear-night {
+  background: radial-gradient(circle at top, #1a2340, #02010f);
+  color: #f5f5ff;
+}
+
+/* 曇り（昼） */
+.app-theme-cloudy-day {
+  background: linear-gradient(160deg, #d7dde8, #f5f7fa);
+}
+
+/* 曇り（夜） */
+.app-theme-cloudy-night {
+  background: linear-gradient(160deg, #2b303b, #4b5563);
+  color: #f5f5ff;
+}
+
+/* 雨（昼） */
+.app-theme-rain-day {
+  background: linear-gradient(160deg, #7f9fbf, #4b6cb7);
+  color: #f8fbff;
+}
+
+/* 雨（夜） */
+.app-theme-rain-night {
+  background: linear-gradient(160deg, #1f2933, #202b40);
+  color: #f5f5ff;
+}
+
+/* 雪 */
+.app-theme-snow {
+  background: linear-gradient(160deg, #fdfbfb, #ebedee);
+}
