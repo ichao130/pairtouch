@@ -1,145 +1,205 @@
 // functions/index.js
 
+const admin = require("firebase-admin");
+
+// v2 Firestore & Scheduler
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const logger = require("firebase-functions/logger");
 
-const { initializeApp } = require("firebase-admin/app");
-const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const axios = require("axios");
+
+// --- 環境変数から OpenWeather API キーを読む ---
+// 事前に `firebase functions:secrets:set OPENWEATHER_API_KEY` を実行しておく前提
+const { defineSecret } = require("firebase-functions/params");
+const OPENWEATHER_API_KEY = defineSecret("OPENWEATHER_API_KEY");
 
 // Admin SDK 初期化
-initializeApp();
-
-// ★ Firestore の named DB（pairtouch01）を使う
-const db = getFirestore("pairtouch01");
-
-// ★ OpenWeather APIキー（functions/.env か GCP 環境変数から）
-const OPENWEATHER_KEY = process.env.OPENWEATHER_API_KEY;
+admin.initializeApp();
+const db = admin.firestore();
+const messaging = admin.messaging();
 
 /**
- * users/{uid} ドキュメントの location が変わったときに、
- * OpenWeather から「天気＋昼夜」を取って users/{uid}.weather に書き込む
+ * 位置情報が変わったときに OpenWeather から天気を取得して
+ * users/{uid}.weather に保存する
  */
-exports.locationWeatherUpdater = onDocumentWritten(
+exports.updateWeatherOnLocationChange = onDocumentWritten(
   {
-    document: "users/{uid}",
-    database: "pairtouch01",   // ← named DB 指定
-    region: "us-central1"
+    document: "users/{userId}",
+    secrets: [OPENWEATHER_API_KEY],
+    region: "us-central1",
   },
   async (event) => {
-    const uid = event.params.uid;
+    const userId = event.params.userId;
 
-    const beforeSnap = event.data.before;
-    const afterSnap = event.data.after;
+    const beforeData = event.data.before.exists ? event.data.before.data() : null;
+    const afterData = event.data.after.exists ? event.data.after.data() : null;
 
-    // ドキュメント削除時などは何もしない
-    if (!afterSnap.exists) {
-      logger.info("Document deleted, skip", { uid });
+    if (!afterData) {
+      logger.log(`User ${userId} document deleted. Skip weather update.`);
       return;
     }
 
-    const after = afterSnap.data();
-    const before = beforeSnap.exists ? beforeSnap.data() : null;
+    const prevLoc = beforeData?.location || null;
+    const newLoc = afterData.location || null;
 
-    const loc = after.location;
-
-    // location がない場合はスキップ
-    if (!loc || typeof loc.lat !== "number" || typeof loc.lng !== "number") {
-      logger.info("No location field, skip weather update", { uid });
+    // 位置情報がない場合はスキップ
+    if (!newLoc || typeof newLoc.lat !== "number" || typeof newLoc.lng !== "number") {
+      logger.log(`User ${userId} has no valid location. Skip weather update.`);
       return;
     }
 
-    // location が前と同じならスキップ（無限ループ防止）
+    // 位置が変わっていなければスキップ（ゆるめ）
     if (
-      before &&
-      before.location &&
-      before.location.lat === loc.lat &&
-      before.location.lng === loc.lng
+      prevLoc &&
+      typeof prevLoc.lat === "number" &&
+      typeof prevLoc.lng === "number"
     ) {
-      logger.info("Location unchanged, skip", { uid });
-      return;
-    }
-
-    if (!OPENWEATHER_KEY) {
-      logger.error("OPENWEATHER_API_KEY is not set");
-      return;
-    }
-
-    const lat = loc.lat;
-    const lon = loc.lng;
-
-    const url =
-      `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}` +
-      `&appid=${OPENWEATHER_KEY}&units=metric&lang=ja`;
-
-    logger.info("Calling OpenWeather", { uid, lat, lon });
-
-    let json;
-    try {
-      // Node.js 20 なので fetch がそのまま使える
-      const res = await fetch(url);
-      if (!res.ok) {
-        logger.error("OpenWeather API error", { status: res.status, uid });
+      const diffLat = Math.abs(prevLoc.lat - newLoc.lat);
+      const diffLng = Math.abs(prevLoc.lng - newLoc.lng);
+      if (diffLat < 0.001 && diffLng < 0.001) {
+        logger.log(`User ${userId} location not changed enough. Skip weather update.`);
         return;
       }
-      json = await res.json();
-    } catch (e) {
-      logger.error("Failed to call OpenWeather", {
-        uid,
-        error: e.toString()
-      });
+    }
+
+    const apiKey = OPENWEATHER_API_KEY.value();
+    if (!apiKey) {
+      logger.error("OPENWEATHER_API_KEY is not set.");
       return;
     }
 
-    const weatherArray = json.weather || [];
-    const main = weatherArray[0]?.main || "Unknown";   // "Clear" / "Clouds" / ...
-    const tempC = typeof json.main?.temp === "number" ? json.main.temp : null;
-    const icon = weatherArray[0]?.icon || null;
+    try {
+      const url = "https://api.openweathermap.org/data/2.5/weather";
+      const params = {
+        lat: newLoc.lat,
+        lon: newLoc.lng,
+        appid: apiKey,
+        units: "metric",
+        lang: "ja",
+      };
 
-    // 昼 / 夜の判定（UTC 秒基準）
-    const dt = json.dt;
-    const sunrise = json.sys?.sunrise;
-    const sunset = json.sys?.sunset;
+      const res = await axios.get(url, { params });
+      const w = res.data;
 
-    let isDaytime = null;
-    if (
-      typeof dt === "number" &&
-      typeof sunrise === "number" &&
-      typeof sunset === "number"
-    ) {
-      isDaytime = dt >= sunrise && dt < sunset;
+      // シンプルな形に整形
+      const weatherData = {
+        raw: {
+          id: w.weather?.[0]?.id ?? null,
+          main: w.weather?.[0]?.main ?? null,
+          description: w.weather?.[0]?.description ?? null,
+        },
+        temp: typeof w.main?.temp === "number" ? w.main.temp : null,
+        isDaytime:
+          typeof w.dt === "number" &&
+          typeof w.sys?.sunrise === "number" &&
+          typeof w.sys?.sunset === "number"
+            ? w.dt >= w.sys.sunrise && w.dt <= w.sys.sunset
+            : null,
+        // 簡易カテゴリー
+        condition: (() => {
+          const main = (w.weather?.[0]?.main || "").toLowerCase();
+          if (main.includes("rain") || main.includes("drizzle") || main.includes("thunder")) {
+            return "rain";
+          }
+          if (main.includes("snow")) {
+            return "snow";
+          }
+          if (main.includes("cloud")) {
+            return "cloudy";
+          }
+          if (main.includes("clear")) {
+            return "clear";
+          }
+          return "other";
+        })(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      await db.collection("users").doc(userId).set(
+        {
+          weather: weatherData,
+        },
+        { merge: true }
+      );
+
+      logger.log(`Weather updated for user ${userId}`);
+    } catch (err) {
+      logger.error("Failed to fetch or save weather for user:", userId, err);
+    }
+  }
+);
+
+/**
+ * 1日1回、pair touch をそっと開くようにリマインドする通知を送る
+ *
+ * - Asia/Tokyo の 20:00 に実行（必要なら時間は後で変えられる）
+ * - users コレクションをざっと見て、fcmTokens を持っているユーザーに通知
+ */
+exports.sendDailyReminder = onSchedule(
+  {
+    schedule: "0 20 * * *",      // 毎日 20:00
+    timeZone: "Asia/Tokyo",
+    region: "us-central1",
+  },
+  async (event) => {
+    logger.log("Running daily reminder job...");
+
+    const snapshot = await db.collection("users").get();
+    const messages = [];
+
+    snapshot.forEach((docSnap) => {
+      const data = docSnap.data();
+      const tokensMap = data.fcmTokens || {};
+      const tokens = Object.keys(tokensMap).filter((t) => !!t);
+
+      if (!tokens.length) {
+        return;
+      }
+
+      // ここで「最近開いてなさそうな人だけに送る」などのロジックも足せる
+      tokens.forEach((token) => {
+        messages.push({
+          token,
+          notification: {
+            title: "pair touch",
+            body: "きょうも、相手の気配をちょっとだけのぞいてみませんか？",
+          },
+          data: {
+            type: "daily_reminder",
+          },
+        });
+      });
+    });
+
+    if (!messages.length) {
+      logger.log("No FCM tokens found. Skipping send.");
+      return;
     }
 
-    // condition をざっくりカテゴリ化
-    let condition = "unknown";
-    const mainLower = main.toLowerCase();
-    if (mainLower.includes("clear")) {
-      condition = "clear";
-    } else if (mainLower.includes("cloud")) {
-      condition = "cloudy";
-    } else if (mainLower.includes("rain") || mainLower.includes("drizzle")) {
-      condition = "rain";
-    } else if (mainLower.includes("thunder")) {
-      condition = "storm";
-    } else if (mainLower.includes("snow")) {
-      condition = "snow";
+    logger.log(`Sending ${messages.length} reminder messages...`);
+
+    // FCM の制限に合わせて 500 件ずつ送る
+    const chunkSize = 500;
+    for (let i = 0; i < messages.length; i += chunkSize) {
+      const batch = messages.slice(i, i + chunkSize);
+      try {
+        const res = await messaging.sendAll(batch);
+        logger.log(
+          `Batch ${i / chunkSize + 1}: success=${res.successCount}, failure=${res.failureCount}`
+        );
+        if (res.failureCount > 0) {
+          res.responses.forEach((r, idx) => {
+            if (!r.success) {
+              logger.warn("Failed message", batch[idx].token, r.error);
+            }
+          });
+        }
+      } catch (err) {
+        logger.error("Error sending FCM batch:", err);
+      }
     }
 
-    const weatherData = {
-      condition,          // "clear" | "cloudy" | "rain" | "storm" | "snow" | "unknown"
-      isDaytime,          // true | false | null
-      tempC,              // 気温（℃）
-      icon,               // OpenWeather のアイコンコード（例: "01d"）
-      rawMain: main,      // デバッグ用
-      updatedAt: FieldValue.serverTimestamp()
-    };
-
-    logger.info("Saving weather to Firestore", { uid, weatherData });
-
-    await db.doc(`users/${uid}`).set(
-      { weather: weatherData },
-      { merge: true }
-    );
-
-    return;
+    logger.log("Daily reminder job finished.");
   }
 );
