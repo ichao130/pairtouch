@@ -172,7 +172,8 @@ exports.locationWeatherUpdater = onDocumentWritten(
  *  - users/{uid}.pairId があり、pairs/{pairId} で相手が決まっている
  *  - 相手の users/{otherUid}.fcmTokens にトークンが入っている
  */
-exports.notifyPartnerWhenOpened = onDocumentWritten(
+
+exports.notifyPartnerOpened = onDocumentWritten(
   {
     document: "users/{uid}",
     database: "pairtouch01",
@@ -180,131 +181,115 @@ exports.notifyPartnerWhenOpened = onDocumentWritten(
   },
   async (event) => {
     const uid = event.params.uid;
+
     const beforeSnap = event.data.before;
     const afterSnap = event.data.after;
 
     if (!afterSnap.exists) {
-      logger.info("Document deleted, skip notify", { uid });
+      logger.info("Document deleted, skip (notifyPartnerOpened)", { uid });
       return;
     }
 
     const after = afterSnap.data();
     const before = beforeSnap.exists ? beforeSnap.data() : null;
 
-    const afterLast = after.lastOpenedAt;
-    const beforeLast = before?.lastOpenedAt;
+    const afterLastOpened = after.lastOpenedAt;
+    const beforeLastOpened = before?.lastOpenedAt;
 
-    // lastOpenedAt がないならスキップ
-    if (!afterLast) {
-      logger.info("No lastOpenedAt, skip notify", { uid });
+    // lastOpenedAt が無い / 変わってないときはスキップ
+    if (!afterLastOpened) {
+      logger.info("No lastOpenedAt, skip", { uid });
+      return;
+    }
+    if (
+      beforeLastOpened &&
+      beforeLastOpened.toMillis &&
+      afterLastOpened.toMillis &&
+      beforeLastOpened.toMillis() === afterLastOpened.toMillis()
+    ) {
+      logger.info("lastOpenedAt unchanged, skip", { uid });
       return;
     }
 
-    // 変化がないならスキップ
-    try {
-      const afterMs =
-        typeof afterLast.toMillis === "function"
-          ? afterLast.toMillis()
-          : new Date(afterLast).getTime();
-      const beforeMs =
-        beforeLast && typeof beforeLast.toMillis === "function"
-          ? beforeLast.toMillis()
-          : beforeLast
-          ? new Date(beforeLast).getTime()
-          : null;
-
-      if (beforeMs && afterMs === beforeMs) {
-        logger.info("lastOpenedAt unchanged, skip notify", {
-          uid,
-          beforeMs,
-          afterMs,
-        });
-        return;
-      }
-    } catch (e) {
-      logger.warn("Failed to compare lastOpenedAt", { uid, error: e.toString() });
-    }
+    const fromUid = uid;
+    const fromName = after.displayName || "相手";
 
     const pairId = after.pairId;
     if (!pairId) {
-      logger.info("No pairId, skip notify", { uid });
+      logger.info("No pairId, skip notifyPartnerOpened", { uid });
       return;
     }
 
-    // pairs/{pairId} から相手 uid を取得
-    const pairRef = db.doc(`pairs/${pairId}`);
-    const pairSnap = await pairRef.get();
+    // ペアドキュメントを取得
+    const pairSnap = await db.doc(`pairs/${pairId}`).get();
     if (!pairSnap.exists) {
-      logger.info("Pair doc not found, skip notify", { uid, pairId });
+      logger.info("Pair doc not found, skip", { uid, pairId });
       return;
     }
 
     const pair = pairSnap.data();
-    const otherUid = pair.ownerUid === uid ? pair.partnerUid : pair.ownerUid;
+    const ownerUid = pair.ownerUid;
+    const partnerUid = pair.partnerUid;
 
-    if (!otherUid) {
-      logger.info("No partner uid yet (pairing not completed)", {
-        uid,
-        pairId,
-      });
+    const toUid =
+      ownerUid === fromUid ? partnerUid : ownerUid;
+
+    if (!toUid) {
+      logger.info("No partner uid in pair, skip", { uid, pairId });
       return;
     }
 
-    // 相手の fcmTokens を取得
-    const partnerRef = db.doc(`users/${otherUid}`);
-    const partnerSnap = await partnerRef.get();
-
-    if (!partnerSnap.exists) {
-      logger.info("Partner user doc not found", { otherUid });
+    // 相手のユーザードキュメント
+    const toUserSnap = await db.doc(`users/${toUid}`).get();
+    if (!toUserSnap.exists) {
+      logger.info("Target user doc not found, skip", { toUid });
       return;
     }
 
-    const partnerData = partnerSnap.data();
-    const fcmTokensMap = partnerData.fcmTokens || {};
-    const tokens = Object.keys(fcmTokensMap).filter((t) => !!fcmTokensMap[t]);
+    const toUser = toUserSnap.data();
+    const fcmTokensObj = toUser.fcmTokens || {};
+
+    const tokens = Object.keys(fcmTokensObj).filter((t) => !!t);
 
     if (!tokens.length) {
-      logger.info("No FCM tokens for partner", {
-        otherUid,
-      });
+      logger.info("No FCM tokens for target user, skip", { toUid });
       return;
     }
 
-    const displayName = after.displayName || "パートナー";
+    const messaging = getMessaging();
 
-    const notification = {
-      title: "pair touch",
-      body: `${displayName} が pair touch をひらきました。`,
+    const payload = {
+      notification: {
+        title: "pair touch",
+        body: `${fromName} が pair touch をひらきました。`,
+      },
+      data: {
+        type: "partner_opened",
+        fromUid,
+        fromName,
+      },
+      tokens,
     };
-
-    const data = {
-      type: "partner_opened",
-      fromUid: uid,
-      pairId: pairId,
-    };
-
-    logger.info("Sending FCM to partner", {
-      fromUid: uid,
-      toUid: otherUid,
-      tokensCount: tokens.length,
-    });
 
     try {
-      const messaging = getMessaging();
-      const res = await messaging.sendMulticast({
-        tokens,
-        notification,
-        data,
-      });
-      logger.info("FCM multicast result", {
+      const res = await messaging.sendEachForMulticast(payload);
+
+      logger.info("FCM send result", {
+        fromUid,
+        toUid,
         successCount: res.successCount,
         failureCount: res.failureCount,
+        responses: res.responses.map((r, idx) => ({
+          idx,
+          success: r.success,
+          error: r.error ? r.error.toString() : null,
+        })),
       });
     } catch (e) {
       logger.error("Failed to send FCM", {
+        fromUid,
+        toUid,
         error: e.toString(),
-        fromUid: uid,
-        toUid: otherUid,
       });
     }
   }
