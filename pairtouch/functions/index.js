@@ -5,6 +5,7 @@ const logger = require("firebase-functions/logger");
 
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const { getMessaging } = require("firebase-admin/messaging");
 
 // Admin SDK 初期化
 initializeApp();
@@ -16,13 +17,14 @@ const db = getFirestore("pairtouch01");
 const OPENWEATHER_KEY = process.env.OPENWEATHER_API_KEY;
 
 /**
- * users/{uid} ドキュメントの location が変わったときに、
- * OpenWeather から「天気＋昼夜」を取って users/{uid}.weather に書き込む
+ * ==========================
+ * 1) 位置情報 → 天気更新
+ * ==========================
  */
 exports.locationWeatherUpdater = onDocumentWritten(
   {
     document: "users/{uid}",
-    database: "pairtouch01",   // ← named DB 指定
+    database: "pairtouch01",
     region: "us-central1",
   },
   async (event) => {
@@ -73,14 +75,9 @@ exports.locationWeatherUpdater = onDocumentWritten(
 
     logger.info("Calling OpenWeather", { uid, lat, lon, url });
 
-    // =========================
-    // ★ 生テキスト→JSON.parse 方式に変更
-    // =========================
     let json;
     try {
       const res = await fetch(url);
-
-      // まず生のレスポンス文字列を取得
       const rawText = await res.text();
 
       logger.info("OpenWeather raw response (head 200)", {
@@ -94,7 +91,6 @@ exports.locationWeatherUpdater = onDocumentWritten(
           status: res.status,
           head: rawText.slice(0, 200),
         });
-        // HTML エラーページなどが返ってきていると JSON として読めないのでここで終了
         return;
       }
 
@@ -122,7 +118,6 @@ exports.locationWeatherUpdater = onDocumentWritten(
       typeof json.main?.temp === "number" ? json.main.temp : null;
     const icon = weatherArray[0]?.icon || null;
 
-    // 昼 / 夜の判定（UTC 秒基準）
     const dt = json.dt;
     const sunrise = json.sys?.sunrise;
     const sunset = json.sys?.sunset;
@@ -136,7 +131,6 @@ exports.locationWeatherUpdater = onDocumentWritten(
       isDaytime = dt >= sunrise && dt < sunset;
     }
 
-    // condition をざっくりカテゴリ化
     let condition = "unknown";
     const mainLower = (main || "").toLowerCase();
     if (mainLower.includes("clear")) {
@@ -152,11 +146,11 @@ exports.locationWeatherUpdater = onDocumentWritten(
     }
 
     const weatherData = {
-      condition,      // "clear" | "cloudy" | "rain" | "storm" | "snow" | "unknown"
-      isDaytime,      // true | false | null
-      tempC,          // 気温（℃）
-      icon,           // OpenWeather のアイコンコード（例: "01d"）
-      rawMain: main,  // デバッグ用
+      condition,
+      isDaytime,
+      tempC,
+      icon,
+      rawMain: main,
       updatedAt: FieldValue.serverTimestamp(),
     };
 
@@ -166,7 +160,137 @@ exports.locationWeatherUpdater = onDocumentWritten(
       { weather: weatherData },
       { merge: true }
     );
+  }
+);
 
-    return;
+/**
+ * ==========================
+ * 2) 相手がアプリを開いたら FCM 通知
+ * ==========================
+ * 条件:
+ *  - users/{uid}.lastOpenedAt が変化したとき
+ *  - users/{uid}.pairId があり、pairs/{pairId} で相手が決まっている
+ *  - 相手の users/{otherUid}.fcmTokens にトークンが入っている
+ */
+
+exports.notifyPartnerOpened = onDocumentWritten(
+  {
+    document: "users/{uid}",
+    database: "pairtouch01",
+    region: "us-central1",
+  },
+  async (event) => {
+    const uid = event.params.uid;
+
+    const beforeSnap = event.data.before;
+    const afterSnap = event.data.after;
+
+    if (!afterSnap.exists) {
+      logger.info("Document deleted, skip (notifyPartnerOpened)", { uid });
+      return;
+    }
+
+    const after = afterSnap.data();
+    const before = beforeSnap.exists ? beforeSnap.data() : null;
+
+    const afterLastOpened = after.lastOpenedAt;
+    const beforeLastOpened = before?.lastOpenedAt;
+
+    // lastOpenedAt が無い / 変わってないときはスキップ
+    if (!afterLastOpened) {
+      logger.info("No lastOpenedAt, skip", { uid });
+      return;
+    }
+    if (
+      beforeLastOpened &&
+      beforeLastOpened.toMillis &&
+      afterLastOpened.toMillis &&
+      beforeLastOpened.toMillis() === afterLastOpened.toMillis()
+    ) {
+      logger.info("lastOpenedAt unchanged, skip", { uid });
+      return;
+    }
+
+    const fromUid = uid;
+    const fromName = after.displayName || "相手";
+
+    const pairId = after.pairId;
+    if (!pairId) {
+      logger.info("No pairId, skip notifyPartnerOpened", { uid });
+      return;
+    }
+
+    // ペアドキュメントを取得
+    const pairSnap = await db.doc(`pairs/${pairId}`).get();
+    if (!pairSnap.exists) {
+      logger.info("Pair doc not found, skip", { uid, pairId });
+      return;
+    }
+
+    const pair = pairSnap.data();
+    const ownerUid = pair.ownerUid;
+    const partnerUid = pair.partnerUid;
+
+    const toUid =
+      ownerUid === fromUid ? partnerUid : ownerUid;
+
+    if (!toUid) {
+      logger.info("No partner uid in pair, skip", { uid, pairId });
+      return;
+    }
+
+    // 相手のユーザードキュメント
+    const toUserSnap = await db.doc(`users/${toUid}`).get();
+    if (!toUserSnap.exists) {
+      logger.info("Target user doc not found, skip", { toUid });
+      return;
+    }
+
+    const toUser = toUserSnap.data();
+    const fcmTokensObj = toUser.fcmTokens || {};
+
+    const tokens = Object.keys(fcmTokensObj).filter((t) => !!t);
+
+    if (!tokens.length) {
+      logger.info("No FCM tokens for target user, skip", { toUid });
+      return;
+    }
+
+    const messaging = getMessaging();
+
+    const payload = {
+      notification: {
+        title: "pair touch",
+        body: `${fromName} が pair touch をひらきました。`,
+      },
+      data: {
+        type: "partner_opened",
+        fromUid,
+        fromName,
+      },
+      tokens,
+    };
+
+    try {
+      const res = await messaging.sendEachForMulticast(payload);
+
+      logger.info("FCM send result", {
+        fromUid,
+        toUid,
+        successCount: res.successCount,
+        failureCount: res.failureCount,
+        responses: res.responses.map((r, idx) => ({
+          idx,
+          success: r.success,
+          error: r.error ? r.error.toString() : null,
+        })),
+      });
+    } catch (e) {
+      logger.error("Failed to send FCM", {
+        fromUid,
+        toUid,
+        error: e.toString(),
+      });
+    }
   }
 );
