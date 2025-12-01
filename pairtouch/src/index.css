@@ -1,107 +1,272 @@
-:root {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  background-color: #f7f7f7;
-  color: #222;
-}
-
-body {
-  margin: 0;
-}
-
+/* ベースレイアウト */
 .app-root {
   min-height: 100vh;
-  max-width: 480px;
-  margin: 0 auto;
-  padding: 16px 20px 40px;
+  margin: 0;
+  padding: 16px 12px 40px;
+  box-sizing: border-box;
+
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  align-items: stretch;
+
+  /* 背景アニメーション用 */
+  background-size: 400% 400%;
+  animation: bgGradientMove 28s ease-in-out infinite;
+  transition: background 0.6s ease, color 0.4s ease;
+
+  color: #ffffff;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", sans-serif;
 }
 
+/* ヘッダーやセクションの見た目はこの辺はお好みで */
 .app-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-}
-
-.app-header h1 {
-  margin: 0;
-  font-size: 20px;
+  margin-bottom: 16px;
 }
 
 .app-main {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
 .section-block {
-  padding: 14px 16px;
-  background-color: #ffffff;
-  border-radius: 12px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+  background: rgba(0, 0, 0, 0.28);
+  border-radius: 16px;
+  padding: 12px 14px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
 }
 
-.section-block h2 {
-  font-size: 16px;
-  margin: 0 0 8px;
-}
-
+/* ボタンざっくり */
 button {
-  padding: 8px 12px;
   border-radius: 999px;
   border: none;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 13px;
   cursor: pointer;
-  background-color: #222;
-  color: white;
-  font-size: 14px;
+  backdrop-filter: blur(12px);
+  transition: transform 0.08s ease, box-shadow 0.12s ease,
+    background 0.12s ease, opacity 0.12s ease;
 }
 
 button:hover {
+  background: rgba(255, 255, 255, 0.24);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+button:active {
+  transform: scale(0.96);
   opacity: 0.9;
 }
 
-.mood-row {
+/* =========================
+   天気ごとの背景テーマ
+   ========================= */
+
+/* デフォルト（相手の天気がまだ無いとき） */
+.app-theme-default {
+  background-image: radial-gradient(circle at 0% 0%, #3850d7, transparent 55%),
+    radial-gradient(circle at 100% 100%, #f472b6, transparent 55%),
+    linear-gradient(135deg, #1d2433, #111827);
+}
+
+/* 晴れ・昼 */
+.app-theme-clear-day {
+  background-image: radial-gradient(circle at 10% 0%, #facc15, transparent 55%),
+    radial-gradient(circle at 100% 80%, #38bdf8, transparent 55%),
+    linear-gradient(135deg, #38bdf8, #0ea5e9);
+}
+
+/* 晴れ・夜 */
+.app-theme-clear-night {
+  background-image: radial-gradient(circle at 10% 0%, #facc15, transparent 45%),
+    radial-gradient(circle at 90% 80%, #4f46e5, transparent 60%),
+    linear-gradient(160deg, #020617, #111827);
+}
+
+/* くもり・昼 */
+.app-theme-cloudy-day {
+  background-image: radial-gradient(circle at 0% 0%, #e5e7eb, transparent 55%),
+    radial-gradient(circle at 100% 100%, #9ca3af, transparent 55%),
+    linear-gradient(145deg, #9ca3af, #6b7280);
+}
+
+/* くもり・夜 */
+.app-theme-cloudy-night {
+  background-image: radial-gradient(circle at 0% 0%, #6b7280, transparent 55%),
+    radial-gradient(circle at 100% 100%, #4b5563, transparent 55%),
+    linear-gradient(145deg, #020617, #1f2937);
+}
+
+/* 雨・昼 */
+.app-theme-rain-day {
+  background-image: radial-gradient(circle at 0% 0%, #bae6fd, transparent 55%),
+    radial-gradient(circle at 100% 100%, #38bdf8, transparent 55%),
+    linear-gradient(160deg, #0f172a, #1e293b);
+}
+
+/* 雨・夜 */
+.app-theme-rain-night {
+  background-image: radial-gradient(circle at 0% 0%, #0f172a, transparent 55%),
+    radial-gradient(circle at 100% 100%, #1d4ed8, transparent 55%),
+    linear-gradient(160deg, #020617, #020617);
+}
+
+/* 雪（昼夜まとめて） */
+.app-theme-snow {
+  background-image: radial-gradient(circle at 0% 0%, #e5e7eb, transparent 50%),
+    radial-gradient(circle at 100% 100%, #bfdbfe, transparent 55%),
+    linear-gradient(145deg, #e5e7eb, #94a3b8);
+}
+
+/* 背景グラデーションがゆっくり動く */
+@keyframes bgGradientMove {
+  0% {
+    background-position: 0% 30%;
+  }
+  50% {
+    background-position: 100% 70%;
+  }
+  100% {
+    background-position: 0% 30%;
+  }
+}
+
+/* =========================
+   雨・雪のパーティクルっぽい演出
+   ========================= */
+
+/* 雨粒 */
+.app-theme-rain-day::before,
+.app-theme-rain-night::before {
+  content: "";
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  background-image: linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.16) 2px,
+      transparent 2px
+    ),
+    linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.09) 1px,
+      transparent 1px
+    );
+  background-size: 2px 18px, 1px 12px;
+  opacity: 0.45;
+  animation: rainDrizzle 0.9s linear infinite;
+}
+
+@keyframes rainDrizzle {
+  0% {
+    transform: translateY(-10px);
+  }
+  100% {
+    transform: translateY(10px);
+  }
+}
+
+/* 雪 */
+.app-theme-snow::before {
+  content: "";
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  background-image: radial-gradient(
+      circle at 10% 0%,
+      rgba(255, 255, 255, 0.95) 1px,
+      transparent 3px
+    ),
+    radial-gradient(
+      circle at 80% 20%,
+      rgba(255, 255, 255, 0.8) 1.5px,
+      transparent 3px
+    ),
+    radial-gradient(
+      circle at 20% 80%,
+      rgba(255, 255, 255, 0.9) 1px,
+      transparent 3px
+    );
+  background-size: 140px 140px, 200px 200px, 180px 180px;
+  animation: snowDrift 18s linear infinite;
+  opacity: 0.85;
+}
+
+@keyframes snowDrift {
+  0% {
+    transform: translate3d(0, -10px, 0);
+  }
+  50% {
+    transform: translate3d(-10px, 10px, 0);
+  }
+  100% {
+    transform: translate3d(0, 30px, 0);
+  }
+}
+
+/* =========================
+   コンパスの見た目（軽くおしゃれに）
+   ========================= */
+
+.compass-wrapper {
+  margin-top: 18px;
   display: flex;
-  gap: 8px;
-  margin-bottom: 6px;
+  justify-content: center;
 }
-
-.mood-row button {
-  font-size: 20px;
-  padding: 8px 10px;
-  background-color: #f2f2f2;
-  color: #222;
-}
-
-.mood-active {
-  border: 2px solid #222;
-  background-color: #e5e5e5;
-}
-
 
 .compass-circle {
   position: relative;
-  width: 160px;
-  height: 160px;
+  width: 140px;
+  height: 140px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.8);
-  background: rgba(0, 0, 0, 0.2); /* ← 背景に少し色をつける */
-  box-shadow: 0 0 10px rgba(0, 0, 0, 0.25);
-  display: flex;
-  justify-content: center;
-  align-items: center;
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  background: radial-gradient(circle at 30% 0%, rgba(255, 255, 255, 0.12), transparent 55%),
+    radial-gradient(circle at 70% 100%, rgba(0, 0, 0, 0.35), transparent 55%);
+  overflow: hidden;
 }
 
 .compass-needle {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 6px;             /* 太くする */
-  height: 70px;
+  width: 4px;
+  height: 70%;
   border-radius: 999px;
-  background: #ff4d4f;    /* はっきりした赤にする */
-  box-shadow: 0 0 6px rgba(0, 0, 0, 0.4);
-  transform-origin: 50% 90%; /* 下側を中心に回転 */
+  transform-origin: 50% 80%;
+  background: linear-gradient(to bottom, #f97316 0%, #f97316 50%, #ffffff 50%);
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.6);
+  transition: transform 0.25s ease-out;
+}
+
+.compass-center-dot {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #0f172a;
+  border: 2px solid #e5e7eb;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.compass-n-label {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
 }
