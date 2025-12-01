@@ -15,6 +15,13 @@ const db = getFirestore("pairtouch01");
 // ★ OpenWeather APIキー（functions/.env か GCP 環境変数から）
 const OPENWEATHER_KEY = process.env.OPENWEATHER_API_KEY;
 
+// 起動時にキーの有無をログに出しておく
+if (!OPENWEATHER_KEY) {
+  logger.warn(
+    "[functions] OPENWEATHER_API_KEY が設定されていません。天気更新は失敗します。"
+  );
+}
+
 /**
  * users/{uid} ドキュメントの location が変わったときに、
  * OpenWeather から「天気＋昼夜」を取って users/{uid}.weather に書き込む
@@ -22,7 +29,7 @@ const OPENWEATHER_KEY = process.env.OPENWEATHER_API_KEY;
 exports.locationWeatherUpdater = onDocumentWritten(
   {
     document: "users/{uid}",
-    database: "pairtouch01",   // ← named DB 指定
+    database: "pairtouch01", // ← named DB 指定
     region: "us-central1",
   },
   async (event) => {
@@ -44,7 +51,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
 
     // location がない場合はスキップ
     if (!loc || typeof loc.lat !== "number" || typeof loc.lng !== "number") {
-      logger.info("No location field, skip weather update", { uid });
+      logger.info("No location field, skip weather update", { uid, loc });
       return;
     }
 
@@ -60,7 +67,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
     }
 
     if (!OPENWEATHER_KEY) {
-      logger.error("OPENWEATHER_API_KEY is not set");
+      logger.error("OPENWEATHER_API_KEY is not set, skip.");
       return;
     }
 
@@ -74,7 +81,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
     logger.info("Calling OpenWeather", { uid, lat, lon, url });
 
     // =========================
-    // ★ 生テキスト→JSON.parse 方式に変更
+    // 生テキスト→JSON.parse 方式
     // =========================
     let json;
     try {
