@@ -2,7 +2,11 @@
 
 import React, { useEffect, useState } from "react";
 import { doc, setDoc, getDoc, onSnapshot } from "firebase/firestore";
-import { auth, googleProvider, db } from "./firebase";
+//import { auth, googleProvider, db } from "./firebase";
+import { app, auth, googleProvider, db } from "./firebase";
+// ここでは firebase/messaging を import しない！
+
+
 import {
   signInWithPopup,
   onAuthStateChanged,
@@ -13,6 +17,8 @@ function App() {
   const [user, setUser] = useState(null);
   const [currentMood, setCurrentMood] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Web Push (FCM) の公開 VAPID キー
+  const VAPID_PUBLIC_KEY ="BJiOsiIH9N8Bpo4CfOlnH-lR_RMWT9ei8FNG8EuApjTg-33IAd0ondpiMVZvuy7M0eYA-XpGpefcaK1FPWorCuc";
 
   // ペア関連
   const [pairId, setPairId] = useState(null); // 自分が所属しているペアID（＝招待コード）
@@ -527,6 +533,10 @@ function App() {
   // ブラウザ通知の ON/OFF（ローカル通知用）
   // =========================
 
+  // =========================
+// 通知（Web Push / FCM）の有効化
+// =========================
+
   const handleEnableNotifications = async () => {
     if (!user) {
       setNotifyStatus("ログインしてから通知を有効にしてください。");
@@ -538,15 +548,67 @@ function App() {
       return;
     }
 
+    // ブラウザの通知権限リクエスト
     const perm = await Notification.requestPermission();
-    if (perm === "granted") {
-      setNotifyStatus(
-        "このブラウザでの通知が許可されました。（いまは実験中の小さな通知だけです）"
+    if (perm !== "granted") {
+      setNotifyStatus("通知が許可されませんでした。");
+      return;
+    }
+
+    try {
+      // ★ここで初めて firebase/messaging を読み込む
+      const {
+        isSupported,
+        getMessaging,
+        getToken,
+        onMessage,
+      } = await import("firebase/messaging");
+
+      const supported = await isSupported();
+      if (!supported) {
+        setNotifyStatus("このブラウザは FCM に対応していません。");
+        return;
+      }
+
+      // Service Worker の準備ができるのを待つ
+      const registration = await navigator.serviceWorker.ready;
+
+      // FCM のインスタンス取得（app は firebase.js で export したやつ）
+      const messaging = getMessaging(app);
+
+      // トークン取得（VAPIDキーと SW を指定）
+      const token = await getToken(messaging, {
+        vapidKey: VAPID_PUBLIC_KEY,
+        serviceWorkerRegistration: registration,
+      });
+
+      if (!token) {
+        setNotifyStatus("通知トークンを取得できませんでした。");
+        return;
+      }
+
+      // Firestore 側の users/{uid} に、この端末のトークンを保存
+      const userRef = doc(db, "users", user.uid);
+      await setDoc(
+        userRef,
+        {
+          fcmTokens: {
+            [token]: true, // { "トークン文字列": true } という map にしておく
+          },
+        },
+        { merge: true }
       );
-    } else if (perm === "denied") {
-      setNotifyStatus("通知が拒否されました。ブラウザの設定を確認してください。");
-    } else {
-      setNotifyStatus("通知の許可が保留状態です。");
+
+      setNotifyStatus("通知（FCM）を有効にしました。");
+      console.log("FCM token:", token);
+
+      // フォアグラウンドでメッセージを受け取ったとき用（ログだけ）
+      onMessage(messaging, (payload) => {
+        console.log("[FCM foreground message]", payload);
+      });
+    } catch (e) {
+      console.error("通知設定でエラー:", e);
+      setNotifyStatus("通知の設定に失敗しました。");
     }
   };
 

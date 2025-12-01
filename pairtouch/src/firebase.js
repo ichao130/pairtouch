@@ -19,5 +19,11 @@ getAnalytics(app);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
+// ★ Firestore のログレベルを "error" に絞る
+setLogLevel("error");
+
 // ★ ここがポイント：第二引数に "pairtouch01"
 export const db = getFirestore(app, "pairtouch01");
+
+// 末尾にこれを追加
+export { app };
