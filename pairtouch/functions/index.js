@@ -5,6 +5,7 @@ const logger = require("firebase-functions/logger");
 
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const { getMessaging } = require("firebase-admin/messaging");
 
 // Admin SDK 初期化
 initializeApp();
@@ -14,13 +15,6 @@ const db = getFirestore("pairtouch01");
 
 // ★ OpenWeather APIキー（functions/.env か GCP 環境変数から）
 const OPENWEATHER_KEY = process.env.OPENWEATHER_API_KEY;
-
-// 起動時にキーの有無をログに出しておく
-if (!OPENWEATHER_KEY) {
-  logger.warn(
-    "[functions] OPENWEATHER_API_KEY が設定されていません。天気更新は失敗します。"
-  );
-}
 
 /**
  * users/{uid} ドキュメントの location が変わったときに、
@@ -51,7 +45,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
 
     // location がない場合はスキップ
     if (!loc || typeof loc.lat !== "number" || typeof loc.lng !== "number") {
-      logger.info("No location field, skip weather update", { uid, loc });
+      logger.info("No location field, skip weather update", { uid });
       return;
     }
 
@@ -67,7 +61,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
     }
 
     if (!OPENWEATHER_KEY) {
-      logger.error("OPENWEATHER_API_KEY is not set, skip.");
+      logger.error("OPENWEATHER_API_KEY is not set");
       return;
     }
 
@@ -81,7 +75,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
     logger.info("Calling OpenWeather", { uid, lat, lon, url });
 
     // =========================
-    // 生テキスト→JSON.parse 方式
+    // ★ 生テキスト→JSON.parse 方式
     // =========================
     let json;
     try {
@@ -159,11 +153,11 @@ exports.locationWeatherUpdater = onDocumentWritten(
     }
 
     const weatherData = {
-      condition,      // "clear" | "cloudy" | "rain" | "storm" | "snow" | "unknown"
-      isDaytime,      // true | false | null
-      tempC,          // 気温（℃）
-      icon,           // OpenWeather のアイコンコード（例: "01d"）
-      rawMain: main,  // デバッグ用
+      condition, // "clear" | "cloudy" | "rain" | "storm" | "snow" | "unknown"
+      isDaytime, // true | false | null
+      tempC, // 気温（℃）
+      icon, // OpenWeather のアイコンコード（例: "01d"）
+      rawMain: main, // デバッグ用
       updatedAt: FieldValue.serverTimestamp(),
     };
 
@@ -173,6 +167,176 @@ exports.locationWeatherUpdater = onDocumentWritten(
       { weather: weatherData },
       { merge: true }
     );
+
+    return;
+  }
+);
+
+/**
+ * ★ 相手がアプリを開いたときにペア相手へ FCM 通知を送るトリガー
+ * - users/{uid}.lastOpenedAt が変わったタイミングで発火
+ * - uid の pairId → pairs/{pairId} から partnerUid を取得
+ * - partner の fcmTokens に対して FCM 送信
+ */
+exports.notifyPartnerOnOpen = onDocumentWritten(
+  {
+    document: "users/{uid}",
+    database: "pairtouch01",
+    region: "us-central1",
+  },
+  async (event) => {
+    const uid = event.params.uid;
+
+    const beforeSnap = event.data.before;
+    const afterSnap = event.data.after;
+
+    if (!afterSnap.exists) {
+      logger.info("Document deleted, skip notifyPartnerOnOpen", { uid });
+      return;
+    }
+
+    const after = afterSnap.data();
+    const before = beforeSnap.exists ? beforeSnap.data() : null;
+
+    const afterOpened = after.lastOpenedAt;
+    const beforeOpened = before?.lastOpenedAt;
+
+    // lastOpenedAt がない場合は何もしない
+    if (!afterOpened || typeof afterOpened.toMillis !== "function") {
+      logger.info("No lastOpenedAt, skip", { uid });
+      return;
+    }
+
+    const afterMs = afterOpened.toMillis();
+    const beforeMs =
+      beforeOpened && typeof beforeOpened.toMillis === "function"
+        ? beforeOpened.toMillis()
+        : null;
+
+    // 前回とほぼ同じならスキップ（無限ループ & 多重通知防止）
+    // ここでは「30秒以内なら同じ」とみなす
+    if (beforeMs && Math.abs(afterMs - beforeMs) < 30 * 1000) {
+      logger.info("lastOpenedAt almost unchanged, skip notify", {
+        uid,
+        beforeMs,
+        afterMs,
+      });
+      return;
+    }
+
+    const pairId = after.pairId;
+    if (!pairId) {
+      logger.info("No pairId, skip notify", { uid });
+      return;
+    }
+
+    // ペアドキュメントから相手の uid を取得
+    const pairRef = db.doc(`pairs/${pairId}`);
+    const pairSnap = await pairRef.get();
+    if (!pairSnap.exists) {
+      logger.info("Pair doc not found, skip notify", { uid, pairId });
+      return;
+    }
+
+    const pair = pairSnap.data();
+    let partnerUid = null;
+    if (pair.ownerUid === uid) {
+      partnerUid = pair.partnerUid || null;
+    } else if (pair.partnerUid === uid) {
+      partnerUid = pair.ownerUid || null;
+    }
+
+    if (!partnerUid) {
+      logger.info("No partnerUid in pair, skip notify", {
+        uid,
+        pairId,
+        pair,
+      });
+      return;
+    }
+
+    // 相手ユーザーの fcmTokens を取得
+    const partnerRef = db.doc(`users/${partnerUid}`);
+    const partnerSnap = await partnerRef.get();
+    if (!partnerSnap.exists) {
+      logger.info("partner user doc not found, skip notify", {
+        uid,
+        partnerUid,
+      });
+      return;
+    }
+
+    const partner = partnerSnap.data();
+    const tokensObj = partner.fcmTokens || {};
+
+    const tokens = Object.keys(tokensObj).filter(Boolean);
+    if (!tokens.length) {
+      logger.info("No FCM tokens for partner, skip notify", {
+        uid,
+        partnerUid,
+      });
+      return;
+    }
+
+    const openerName = after.displayName || "相手";
+
+    const message = {
+      notification: {
+        title: "pair touch",
+        body: `${openerName} が pair touch をひらきました。`,
+      },
+      data: {
+        type: "PARTNER_OPENED",
+        fromUid: uid,
+        pairId: pairId,
+      },
+      tokens,
+    };
+
+    logger.info("Sending FCM to partner", {
+      uid,
+      partnerUid,
+      tokenCount: tokens.length,
+    });
+
+    try {
+      const resp = await getMessaging().sendEachForMulticast(message);
+      logger.info("FCM send result", {
+        uid,
+        partnerUid,
+        successCount: resp.successCount,
+        failureCount: resp.failureCount,
+      });
+
+      // 無効トークンのクリーンアップ
+      const invalidCodes = new Set([
+        "messaging/invalid-registration-token",
+        "messaging/registration-token-not-registered",
+      ]);
+
+      const updates = {};
+      resp.responses.forEach((r, idx) => {
+        if (!r.success && r.error && invalidCodes.has(r.error.code)) {
+          const t = tokens[idx];
+          logger.warn("Invalid FCM token, will delete", {
+            partnerUid,
+            token: t,
+            code: r.error.code,
+          });
+          updates[`fcmTokens.${t}`] = FieldValue.delete();
+        }
+      });
+
+      if (Object.keys(updates).length > 0) {
+        await partnerRef.set(updates, { merge: true });
+      }
+    } catch (e) {
+      logger.error("FCM send error", {
+        uid,
+        partnerUid,
+        error: e.toString(),
+      });
+    }
 
     return;
   }
