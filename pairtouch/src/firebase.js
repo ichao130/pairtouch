@@ -1,8 +1,11 @@
+// src/firebase.js
+
 import { initializeApp } from "firebase/app";
-import { getAnalytics } from "firebase/analytics";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { getMessaging, isSupported } from "firebase/messaging";
 
+// Firebase 設定（あなたのやつ）
 const firebaseConfig = {
   apiKey: "AIzaSyDGcGIuL0SoH2EdcgrBeIpAKkHNOqpq4G0",
   authDomain: "pairtouch-61a68.firebaseapp.com",
@@ -14,16 +17,25 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-getAnalytics(app);
 
+// Firestore（named DB）
+export const db = getFirestore(app, "pairtouch01");
+
+// Auth
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
-// ★ Firestore のログレベルを "error" に絞る
-setLogLevel("error");
-
-// ★ ここがポイント：第二引数に "pairtouch01"
-export const db = getFirestore(app, "pairtouch01");
-
-// 末尾にこれを追加
-export { app };
+/**
+ * ここ重要！
+ * await をトップレベルで使わず、関数を使って messaging を返す
+ */
+export const getMessagingIfSupported = async () => {
+  try {
+    const supported = await isSupported();
+    if (!supported) return null;
+    return getMessaging(app);
+  } catch (e) {
+    console.error("isSupported チェックでエラー:", e);
+    return null;
+  }
+};
