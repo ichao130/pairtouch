@@ -1,9 +1,30 @@
 {
+  // Firestore（named database）
   "firestore": {
+    "database": "pairtouch01",
+    "location": "nam5",
     "rules": "firestore.rules",
-    "indexes": "firestore.indexes.json",
-    "databaseId": "pairtouch01"
+    "indexes": "firestore.indexes.json"
   },
+
+  // Hosting（dist が公開フォルダ）
+  "hosting": {
+    "public": "dist",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    // PWA / SPA の場合、URLは全部 index.html にリライト
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+
+  // Cloud Functions
   "functions": [
     {
       "source": "functions",
