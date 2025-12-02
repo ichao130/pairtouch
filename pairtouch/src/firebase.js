@@ -5,7 +5,7 @@ import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getMessaging, isSupported } from "firebase/messaging";
 
-// Firebase 設定（あなたのやつ）
+// あなたの Firebase 設定
 const firebaseConfig = {
   apiKey: "AIzaSyDGcGIuL0SoH2EdcgrBeIpAKkHNOqpq4G0",
   authDomain: "pairtouch-61a68.firebaseapp.com",
@@ -16,26 +16,34 @@ const firebaseConfig = {
   measurementId: "G-Q04GB70WH1",
 };
 
+// Firebase アプリ初期化
 const app = initializeApp(firebaseConfig);
 
-// Firestore（named DB）
-export const db = getFirestore(app, "pairtouch01");
+// ★ Firestore は named DB "pairtouch01"
+const db = getFirestore(app, "pairtouch01");
 
-// Auth
-export const auth = getAuth(app);
-export const googleProvider = new GoogleAuthProvider();
+// 認証
+const auth = getAuth(app);
+const googleProvider = new GoogleAuthProvider();
 
-/**
- * ここ重要！
- * await をトップレベルで使わず、関数を使って messaging を返す
- */
-export const getMessagingIfSupported = async () => {
-  try {
-    const supported = await isSupported();
-    if (!supported) return null;
-    return getMessaging(app);
-  } catch (e) {
-    console.error("isSupported チェックでエラー:", e);
-    return null;
-  }
-};
+// 🔔 FCM（ブラウザが対応しているときだけ有効にする）
+let messaging = null;
+
+// SSR 対策で window チェック
+if (typeof window !== "undefined") {
+  isSupported()
+    .then((supported) => {
+      if (supported) {
+        messaging = getMessaging(app);
+        console.log("FCM messaging 有効:", messaging);
+      } else {
+        console.log("このブラウザは FCM (messaging) 非対応です");
+      }
+    })
+    .catch((e) => {
+      console.error("isSupported チェックでエラー:", e);
+    });
+}
+
+// 他のファイルで使うために export
+export { app, db, auth, googleProvider, messaging };
