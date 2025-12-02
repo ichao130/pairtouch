@@ -1,25 +1,35 @@
 // functions/index.js
 
+// --- v2 Firestore トリガー & ロガー ---
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const logger = require("firebase-functions/logger");
 
+// --- Admin SDK ---
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { getMessaging } = require("firebase-admin/messaging");
 
-// Admin SDK 初期化
+// Admin 初期化
 initializeApp();
 
-// ★ Firestore の named DB（pairtouch01）を使う
+// ★ Firestore named DB（pairtouch01）
 const db = getFirestore("pairtouch01");
 
-// ★ OpenWeather APIキー（functions/.env か GCP 環境変数から）
+// ★ Admin Messaging (FCM)
+const messaging = getMessaging();
+
+// ★ OpenWeather APIキー（functions/.env か GCP 環境変数）
 const OPENWEATHER_KEY = process.env.OPENWEATHER_API_KEY;
 
+if (!OPENWEATHER_KEY) {
+  logger.warn(
+    "[functions] OPENWEATHER_API_KEY が設定されていません。天気更新は失敗します。"
+  );
+}
+
 /**
- * ==========================
- * 1) 位置情報 → 天気更新
- * ==========================
+ * ① users/{uid}.location が変わったときに OpenWeather から天気取得
+ *    → users/{uid}.weather を更新
  */
 exports.locationWeatherUpdater = onDocumentWritten(
   {
@@ -35,7 +45,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
 
     // ドキュメント削除時などは何もしない
     if (!afterSnap.exists) {
-      logger.info("Document deleted, skip", { uid });
+      logger.info("Document deleted, skip weather", { uid });
       return;
     }
 
@@ -50,14 +60,14 @@ exports.locationWeatherUpdater = onDocumentWritten(
       return;
     }
 
-    // location が前と同じならスキップ（無限ループ防止）
+    // location が前と同じならスキップ
     if (
       before &&
       before.location &&
       before.location.lat === loc.lat &&
       before.location.lng === loc.lng
     ) {
-      logger.info("Location unchanged, skip", { uid });
+      logger.info("Location unchanged, skip weather update", { uid });
       return;
     }
 
@@ -78,6 +88,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
     let json;
     try {
       const res = await fetch(url);
+
       const rawText = await res.text();
 
       logger.info("OpenWeather raw response (head 200)", {
@@ -118,6 +129,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
       typeof json.main?.temp === "number" ? json.main.temp : null;
     const icon = weatherArray[0]?.icon || null;
 
+    // 昼 / 夜の判定（UTC 秒基準）
     const dt = json.dt;
     const sunrise = json.sys?.sunrise;
     const sunset = json.sys?.sunset;
@@ -131,6 +143,7 @@ exports.locationWeatherUpdater = onDocumentWritten(
       isDaytime = dt >= sunrise && dt < sunset;
     }
 
+    // condition をざっくりカテゴリ化
     let condition = "unknown";
     const mainLower = (main || "").toLowerCase();
     if (mainLower.includes("clear")) {
@@ -146,11 +159,11 @@ exports.locationWeatherUpdater = onDocumentWritten(
     }
 
     const weatherData = {
-      condition,
-      isDaytime,
-      tempC,
-      icon,
-      rawMain: main,
+      condition,      // "clear" | "cloudy" | "rain" | "storm" | "snow" | "unknown"
+      isDaytime,      // true | false | null
+      tempC,          // 気温（℃）
+      icon,           // OpenWeather のアイコンコード（例: "01d"）
+      rawMain: main,  // デバッグ用
       updatedAt: FieldValue.serverTimestamp(),
     };
 
@@ -160,20 +173,16 @@ exports.locationWeatherUpdater = onDocumentWritten(
       { weather: weatherData },
       { merge: true }
     );
+
+    return;
   }
 );
 
 /**
- * ==========================
- * 2) 相手がアプリを開いたら FCM 通知
- * ==========================
- * 条件:
- *  - users/{uid}.lastOpenedAt が変化したとき
- *  - users/{uid}.pairId があり、pairs/{pairId} で相手が決まっている
- *  - 相手の users/{otherUid}.fcmTokens にトークンが入っている
+ * ② users/{uid}.lastOpenedAt が変わったときに、
+ *    ペア相手に FCM で「開いたよ」通知を送る
  */
-
-exports.notifyPartnerOpened = onDocumentWritten(
+exports.notifyPartnerWhenOpened = onDocumentWritten(
   {
     document: "users/{uid}",
     database: "pairtouch01",
@@ -186,110 +195,102 @@ exports.notifyPartnerOpened = onDocumentWritten(
     const afterSnap = event.data.after;
 
     if (!afterSnap.exists) {
-      logger.info("Document deleted, skip (notifyPartnerOpened)", { uid });
+      logger.info("User doc deleted, skip notify", { uid });
       return;
     }
 
     const after = afterSnap.data();
     const before = beforeSnap.exists ? beforeSnap.data() : null;
 
-    const afterLastOpened = after.lastOpenedAt;
-    const beforeLastOpened = before?.lastOpenedAt;
+    // --- lastOpenedAt の変化チェック ---
+    const getMillis = (ts) =>
+      ts && typeof ts.toMillis === "function" ? ts.toMillis() : null;
 
-    // lastOpenedAt が無い / 変わってないときはスキップ
-    if (!afterLastOpened) {
-      logger.info("No lastOpenedAt, skip", { uid });
-      return;
-    }
-    if (
-      beforeLastOpened &&
-      beforeLastOpened.toMillis &&
-      afterLastOpened.toMillis &&
-      beforeLastOpened.toMillis() === afterLastOpened.toMillis()
-    ) {
-      logger.info("lastOpenedAt unchanged, skip", { uid });
+    const afterOpenedMs = getMillis(after.lastOpenedAt);
+    const beforeOpenedMs = getMillis(before?.lastOpenedAt);
+
+    if (!afterOpenedMs) {
+      logger.info("No lastOpenedAt, skip notify", { uid });
       return;
     }
 
-    const fromUid = uid;
-    const fromName = after.displayName || "相手";
+    if (beforeOpenedMs && beforeOpenedMs === afterOpenedMs) {
+      logger.info("lastOpenedAt unchanged, skip notify", { uid });
+      return;
+    }
 
+    // --- pairId から partnerUid を取得 ---
     const pairId = after.pairId;
     if (!pairId) {
-      logger.info("No pairId, skip notifyPartnerOpened", { uid });
+      logger.info("No pairId, skip notify", { uid });
       return;
     }
 
-    // ペアドキュメントを取得
     const pairSnap = await db.doc(`pairs/${pairId}`).get();
     if (!pairSnap.exists) {
-      logger.info("Pair doc not found, skip", { uid, pairId });
+      logger.info("pair doc not found, skip notify", { uid, pairId });
       return;
     }
 
-    const pair = pairSnap.data();
-    const ownerUid = pair.ownerUid;
-    const partnerUid = pair.partnerUid;
+    const pairData = pairSnap.data();
+    const partnerUid =
+      pairData.ownerUid === uid ? pairData.partnerUid : pairData.ownerUid;
 
-    const toUid =
-      ownerUid === fromUid ? partnerUid : ownerUid;
-
-    if (!toUid) {
-      logger.info("No partner uid in pair, skip", { uid, pairId });
+    if (!partnerUid) {
+      logger.info("No partnerUid in pair, skip notify", { uid, pairId });
       return;
     }
 
-    // 相手のユーザードキュメント
-    const toUserSnap = await db.doc(`users/${toUid}`).get();
-    if (!toUserSnap.exists) {
-      logger.info("Target user doc not found, skip", { toUid });
+    // --- 相手の fcmTokens を取得 ---
+    const partnerSnap = await db.doc(`users/${partnerUid}`).get();
+    if (!partnerSnap.exists) {
+      logger.info("partner user doc not found, skip notify", {
+        uid,
+        partnerUid,
+      });
       return;
     }
 
-    const toUser = toUserSnap.data();
-    const fcmTokensObj = toUser.fcmTokens || {};
-
-    const tokens = Object.keys(fcmTokensObj).filter((t) => !!t);
+    const partnerData = partnerSnap.data();
+    const fcmTokens = partnerData.fcmTokens || {};
+    const tokens = Object.keys(fcmTokens).filter((t) => fcmTokens[t]);
 
     if (!tokens.length) {
-      logger.info("No FCM tokens for target user, skip", { toUid });
+      logger.info("No FCM tokens for partner, skip notify", {
+        uid,
+        partnerUid,
+      });
       return;
     }
 
-    const messaging = getMessaging();
+    const fromName = after.displayName || "相手";
 
-    const payload = {
+    const message = {
+      tokens,
       notification: {
         title: "pair touch",
         body: `${fromName} が pair touch をひらきました。`,
       },
       data: {
         type: "partner_opened",
-        fromUid,
+        fromUid: uid,
         fromName,
       },
-      tokens,
     };
 
     try {
-      const res = await messaging.sendEachForMulticast(payload);
-
-      logger.info("FCM send result", {
-        fromUid,
-        toUid,
-        successCount: res.successCount,
-        failureCount: res.failureCount,
-        responses: res.responses.map((r, idx) => ({
-          idx,
-          success: r.success,
-          error: r.error ? r.error.toString() : null,
-        })),
+      const response = await messaging.sendEachForMulticast(message);
+      logger.info("Sent FCM to partner", {
+        fromUid: uid,
+        toUid: partnerUid,
+        successCount: response.successCount,
+        failureCount: response.failureCount,
       });
-    } catch (e) {
+    } catch (err) {
       logger.error("Failed to send FCM", {
-        fromUid,
-        toUid,
-        error: e.toString(),
+        fromUid: uid,
+        toUid: partnerUid,
+        error: err.toString(),
       });
     }
   }
