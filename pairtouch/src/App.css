@@ -89,3 +89,64 @@
   background: linear-gradient(135deg, #e5e7eb, #f9fafb);
   color: #111827;
 }
+
+.compass-wrapper {
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+/* コンパスの丸 */
+.compass-circle {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.7);
+  box-sizing: border-box;
+}
+
+/* 針：中心から上に伸びる棒 */
+.compass-needle {
+  position: absolute;
+  top: 44%;
+  left: 56%;
+  width: 4px;
+  height: 80%;              /* 円の直径の 80% くらいの長さ */
+  border-radius: 999px;
+  /* 上半分が白、下半分がオレンジになるようなグラデーション */
+  background: linear-gradient(
+    to bottom,
+    #ffffff 0%,
+    #ffffff 50%,
+    #ff8a00 50%,
+    #ff8a00 100%
+  );
+  /* ★ 回転の中心を「針の真ん中」に */
+  transform-origin: 50% 50%;
+}
+
+/* 中心の点 */
+.compass-center-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+}
+
+/* N ラベル（上） */
+.compass-n-label {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  font-weight: bold;
+  color: #fff;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.7);
+}

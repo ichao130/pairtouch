@@ -238,8 +238,8 @@ button:active {
 
 .compass-needle {
   position: absolute;
-  top: 50%;
-  left: 50%;
+  top: 44%;
+  left: 56%;
   width: 4px;
   height: 70%;
   border-radius: 999px;

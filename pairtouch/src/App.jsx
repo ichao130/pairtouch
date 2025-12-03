@@ -5,8 +5,12 @@ import { doc, setDoc, getDoc, onSnapshot } from "firebase/firestore";
 import { auth, googleProvider, db, messaging } from "./firebase";
 import {
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   onAuthStateChanged,
   signOut,
+  setPersistence,
+  browserLocalPersistence,
 } from "firebase/auth";
 import { getToken } from "firebase/messaging";
 
@@ -34,11 +38,10 @@ function App() {
   const [directionLabel, setDirectionLabel] = useState("");
   const [locStatus, setLocStatus] = useState("");
 
-  // コンパス用
-  const [bearingDeg, setBearingDeg] = useState(null);        // 自分→相手の方角
-  const [deviceHeadingDeg, setDeviceHeadingDeg] = useState(null); // 端末の向き（北=0）
-  const [compassActive, setCompassActive] = useState(false);
-  const [compassStatus, setCompassStatus] = useState("");
+  // コンパス用：相手への方位角（0〜360度）
+  const [bearingDeg, setBearingDeg] = useState(null);
+  // 端末の向き（0〜360度, 北=0。右回り）
+  const [deviceHeading, setDeviceHeading] = useState(null);
 
   // 通知の状態メッセージ
   const [notifyStatus, setNotifyStatus] = useState("");
@@ -50,147 +53,158 @@ function App() {
   // =========================
   // ログイン状態の監視
   // =========================
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
-      (async () => {
-        try {
-          if (!firebaseUser) {
-            console.log("auth: ログアウト状態");
-            setUser(null);
-            setCurrentMood(null);
-            setPairId(null);
-            setPartnerUid(null);
-            setPartnerMood(null);
-            setPartnerName("");
-            setPartnerLastOpenedAt(null);
-            setPartnerWeather(null);
-            setMyLocation(null);
-            setPartnerLocation(null);
-            setDistanceKm(null);
-            setDirectionLabel("");
-            setBearingDeg(null);
-            setDeviceHeadingDeg(null);
-            setPairStatusMessage("");
-            setLocStatus("");
-            setCompassActive(false);
-            setCompassStatus("");
-            setLoading(false);
-            return;
+    useEffect(() => {
+      // ▼ 永続化
+      setPersistence(auth, browserLocalPersistence).catch((e) => {
+        console.warn("setPersistence error:", e);
+      });
+
+      // ▼ redirect の結果を回収
+      getRedirectResult(auth)
+        .then((result) => {
+          if (result && result.user) {
+            console.log(
+              "getRedirectResult: user logged in via redirect:",
+              result.user.uid
+            );
           }
+        })
+        .catch((e) => {
+          console.error("getRedirectResult error:", e);
+        });
 
-          console.log("auth: ログインユーザー:", firebaseUser.uid);
-          setUser(firebaseUser);
-
-          const userRef = doc(db, "users", firebaseUser.uid);
-
-          let data;
+      const unsub = onAuthStateChanged(auth, (firebaseUser) => {
+        (async () => {
           try {
-            const snap = await getDoc(userRef);
-            if (!snap.exists()) {
-              // 初回ログイン時：ユーザードキュメント作成
+            if (!firebaseUser) {
+              console.log("auth: ログアウト状態");
+              setUser(null);
+              setCurrentMood(null);
+              setPairId(null);
+              setPartnerUid(null);
+              setPartnerMood(null);
+              setPartnerName("");
+              setPartnerLastOpenedAt(null);
+              setPartnerWeather(null);
+              setMyLocation(null);
+              setPartnerLocation(null);
+              setDistanceKm(null);
+              setDirectionLabel("");
+              setBearingDeg(null);
+              setPairStatusMessage("");
+              setLocStatus("");
+              setLoading(false);
+              return;
+            }
+
+            console.log("auth: ログインユーザー:", firebaseUser.uid);
+            setUser(firebaseUser);
+
+            const userRef = doc(db, "users", firebaseUser.uid);
+
+            let data;
+            try {
+              const snap = await getDoc(userRef);
+              if (!snap.exists()) {
+                data = {
+                  uid: firebaseUser.uid,
+                  displayName: firebaseUser.displayName ?? "",
+                  iconMoodToday: null,
+                  lastOpenedAt: new Date(),
+                  location: null,
+                  pairId: null,
+                };
+                await setDoc(userRef, data);
+              } else {
+                data = snap.data();
+                await setDoc(
+                  userRef,
+                  { lastOpenedAt: new Date() },
+                  { merge: true }
+                );
+              }
+            } catch (e) {
+              console.error("ユーザードキュメント取得でエラー:", e);
               data = {
                 uid: firebaseUser.uid,
                 displayName: firebaseUser.displayName ?? "",
                 iconMoodToday: null,
-                lastOpenedAt: new Date(),
-                location: null,
                 pairId: null,
+                location: null,
               };
-              await setDoc(userRef, data);
-            } else {
-              data = snap.data();
-              // 最終アクセスだけ更新
-              await setDoc(
-                userRef,
-                { lastOpenedAt: new Date() },
-                { merge: true }
+            }
+
+            setCurrentMood(data.iconMoodToday ?? null);
+
+            const pId = data.pairId ?? null;
+            setPairId(pId);
+            setPairStatusMessage("");
+
+            // ===== アプリを開いたとき自動で位置情報取得 =====
+            if ("geolocation" in navigator) {
+              navigator.geolocation.getCurrentPosition(
+                async (pos) => {
+                  const { latitude, longitude } = pos.coords;
+
+                  const userRef = doc(db, "users", firebaseUser.uid);
+                  await setDoc(
+                    userRef,
+                    {
+                      location: {
+                        lat: latitude,
+                        lng: longitude,
+                        updatedAt: new Date(),
+                      },
+                    },
+                    { merge: true }
+                  );
+
+                  setMyLocation({ lat: latitude, lng: longitude });
+                  console.log("自動位置取得 OK:", latitude, longitude);
+                },
+                (err) => {
+                  console.warn("自動位置取得エラー:", err);
+                },
+                { enableHighAccuracy: true, timeout: 7000 }
               );
             }
+
+            if (
+              data.location &&
+              typeof data.location.lat === "number" &&
+              typeof data.location.lng === "number"
+            ) {
+              setMyLocation({
+                lat: data.location.lat,
+                lng: data.location.lng,
+              });
+            } else {
+              setMyLocation(null);
+            }
           } catch (e) {
-            console.error("ユーザードキュメント取得でエラー:", e);
-            // オフライン時など最低限の情報で続行
-            data = {
-              uid: firebaseUser.uid,
-              displayName: firebaseUser.displayName ?? "",
-              iconMoodToday: null,
-              pairId: null,
-              location: null,
-            };
+            console.error("onAuthStateChanged 内でエラー:", e);
+          } finally {
+            setLoading(false);
           }
+        })();
+      });
 
-          // 自分の調子
-          setCurrentMood(data.iconMoodToday ?? null);
-
-          // ペアID
-          const pId = data.pairId ?? null;
-          setPairId(pId);
-          setPairStatusMessage("");
-
-          // ===== アプリを開いたとき自動で位置情報取得 =====
-          if ("geolocation" in navigator) {
-            navigator.geolocation.getCurrentPosition(
-              async (pos) => {
-                const { latitude, longitude } = pos.coords;
-
-                const userRef = doc(db, "users", firebaseUser.uid);
-                await setDoc(
-                  userRef,
-                  {
-                    location: {
-                      lat: latitude,
-                      lng: longitude,
-                      updatedAt: new Date(),
-                    },
-                  },
-                  { merge: true }
-                );
-
-                setMyLocation({ lat: latitude, lng: longitude });
-                console.log("自動位置取得 OK:", latitude, longitude);
-              },
-              (err) => {
-                console.warn("自動位置取得エラー:", err);
-              },
-              { enableHighAccuracy: true, timeout: 7000 }
-            );
-          }
-
-          // 既存の location があれば state に反映
-          if (
-            data.location &&
-            typeof data.location.lat === "number" &&
-            typeof data.location.lng === "number"
-          ) {
-            setMyLocation({
-              lat: data.location.lat,
-              lng: data.location.lng,
-            });
-          } else {
-            setMyLocation(null);
-          }
-        } catch (e) {
-          console.error("onAuthStateChanged 内でエラー:", e);
-        } finally {
-          setLoading(false);
-        }
-      })();
-    });
-
-    return () => unsub();
-  }, []);
+      return () => unsub();
+    }, []);
 
   // =========================
   // ログイン / ログアウト
   // =========================
 
-  const handleSignIn = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (e) {
-      console.error(e);
-      alert("ログインに失敗しました");
-    }
-  };
+    const handleSignIn = async () => {
+      try {
+        console.log("handleSignIn: use signInWithRedirect (all env)");
+        await signInWithRedirect(auth, googleProvider);
+      } catch (e) {
+        console.error("handleSignIn error:", e);
+        alert("ログインに失敗しました");
+      }
+    };
 
   const handleSignOut = async () => {
     await signOut(auth);
@@ -201,7 +215,7 @@ function App() {
   // =========================
   const handleMoodClick = async (moodCode) => {
     if (!user) return;
-    setCurrentMood(moodCode); // 先に画面だけ反映
+    setCurrentMood(moodCode);
 
     const userRef = doc(db, "users", user.uid);
     try {
@@ -220,7 +234,6 @@ function App() {
   // ペア作成 / 参加
   // =========================
 
-  // 招待コードを作成
   const handleCreateInvite = async () => {
     if (!user) return;
 
@@ -232,7 +245,7 @@ function App() {
     const code = String(Math.floor(100000 + Math.random() * 900000));
     const pairRef = doc(db, "pairs", code);
 
-    // 先にUI更新（楽観的）
+    // 先にUI更新
     setPairId(code);
     setPairStatusMessage(
       "招待コードを作成しました。このコードを相手に伝えてください。"
@@ -261,7 +274,6 @@ function App() {
     }
   };
 
-  // 招待コードでペアに参加
   const handleJoinPair = async () => {
     if (!user) return;
     if (!joinCodeInput.trim()) {
@@ -367,25 +379,8 @@ function App() {
 
   // =========================
   // パートナーのユーザードキュメント購読
+  // （※ローカル通知は出さない：FCM に任せる）
   // =========================
-  const notifyPartnerOpened = (name) => {
-    if (typeof window === "undefined") return;
-    if (!("Notification" in window)) return;
-
-    const title = "pair touch";
-    const body = `${name} が pair touch をひらきました。`;
-
-    if (Notification.permission === "granted") {
-      new Notification(title, { body });
-    } else if (Notification.permission === "default") {
-      Notification.requestPermission().then((perm) => {
-        if (perm === "granted") {
-          new Notification(title, { body });
-        }
-      });
-    }
-  };
-
   useEffect(() => {
     if (!partnerUid) {
       setPartnerMood(null);
@@ -416,12 +411,8 @@ function App() {
         newOpened = ts.toDate();
       }
 
-      setPartnerLastOpenedAt((prev) => {
-        if (prev && newOpened && newOpened.getTime() !== prev.getTime()) {
-          notifyPartnerOpened(data.displayName || "相手");
-        }
-        return newOpened || prev || null;
-      });
+      // ここでは「開いたとき通知」は出さない（Functions+FCM に任せる）
+      setPartnerLastOpenedAt(newOpened || null);
 
       if (
         data.location &&
@@ -616,92 +607,76 @@ function App() {
   }, [myLocation, partnerLocation]);
 
   // =========================
-  // リアルタイムコンパス（端末の向きを取得）
+  // 端末のコンパス（DeviceOrientation）取得
   // =========================
-
-  const handleEnableCompass = async () => {
-    if (typeof window === "undefined") return;
-
-    // 対応していないブラウザ
-    if (
-      typeof window.DeviceOrientationEvent === "undefined" &&
-      typeof window.webkitDeviceOrientationEvent === "undefined"
-    ) {
-      setCompassStatus("この端末はコンパス機能に対応していません。");
-      return;
-    }
-
-    setCompassStatus("コンパスを有効にしようとしています…");
-
-    const startListening = () => {
-      setCompassActive(true);
-      setCompassStatus("コンパスを有効にしました。端末をゆっくり動かしてみてください。");
-    };
-
-    // iOS（許可が必要なパターン）
-    if (
-      typeof window.DeviceOrientationEvent !== "undefined" &&
-      typeof window.DeviceOrientationEvent.requestPermission === "function"
-    ) {
-      try {
-        const perm = await window.DeviceOrientationEvent.requestPermission();
-        if (perm === "granted") {
-          startListening();
-        } else {
-          setCompassStatus("コンパスの利用が許可されませんでした。");
-        }
-      } catch (e) {
-        console.error("DeviceOrientationEvent.requestPermission エラー:", e);
-        setCompassStatus("コンパスの許可取得でエラーが発生しました。");
-      }
-    } else {
-      // Android やデスクトップなど
-      startListening();
-    }
-  };
-
   useEffect(() => {
-    if (!compassActive) return;
     if (typeof window === "undefined") return;
 
     const handleOrientation = (event) => {
       let heading = null;
 
-      // iOS Safari
-      if (typeof event.webkitCompassHeading === "number") {
-        heading = event.webkitCompassHeading; // 北=0, 時計回り
+      // iOS (Safari) 向け webkitCompassHeading
+      const anyEvent = event;
+      if (typeof anyEvent.webkitCompassHeading === "number") {
+        heading = anyEvent.webkitCompassHeading; // 0 = 北
       } else if (typeof event.alpha === "number") {
-        // その他（ざっくり）: alpha はデバイス座標系 → 北基準にざっくり変換
-        // 端末を北に向けたときに 0° になるように、簡易的に 360 - alpha として扱う
-        heading = 360 - event.alpha;
+        // 一般ブラウザ：alpha (0〜360, デバイスが向いている方角)
+        heading = 360 - event.alpha; // 北=0 になるよう反転
       }
 
       if (heading != null) {
-        // 0〜360 に正規化
-        const normalized = ((heading % 360) + 360) % 360;
-        setDeviceHeadingDeg(normalized);
+        const normalized = (heading + 360) % 360;
+        setDeviceHeading(normalized);
       }
     };
 
-    window.addEventListener("deviceorientation", handleOrientation);
+    // iOS 13+ はユーザー操作で requestPermission が必要
+    const setupListener = () => {
+      if (
+        typeof window.DeviceOrientationEvent !== "undefined" &&
+        typeof window.DeviceOrientationEvent.requestPermission === "function"
+      ) {
+        window.DeviceOrientationEvent.requestPermission()
+          .then((state) => {
+            if (state === "granted") {
+              window.addEventListener("deviceorientation", handleOrientation);
+            } else {
+              console.log("DeviceOrientation permission not granted");
+            }
+          })
+          .catch((err) => {
+            console.warn("DeviceOrientation requestPermission error:", err);
+          });
+      } else if (typeof window.DeviceOrientationEvent !== "undefined") {
+        // Android / PC など
+        window.addEventListener("deviceorientation", handleOrientation);
+      } else {
+        console.log("DeviceOrientationEvent not supported");
+      }
+    };
+
+    // 一旦すぐに試す（PWA で一度許可済みならそのまま動く想定）
+    setupListener();
 
     return () => {
-      window.removeEventListener("deviceorientation", handleOrientation);
+      if (typeof window.DeviceOrientationEvent !== "undefined") {
+        window.removeEventListener("deviceorientation", handleOrientation);
+      }
     };
-  }, [compassActive]);
+  }, []);
 
-  // 針の最終角度（相手方向 - 端末の向き）
-  const needleAngleDeg = (() => {
-    if (bearingDeg == null) return 0;
-    if (deviceHeadingDeg == null) return bearingDeg;
+  // コンパス針の角度（画面上）
+  let compassNeedleDeg = 0;
+  if (bearingDeg != null) {
+    if (deviceHeading != null) {
+      // 端末の向きを引いて「端末から見た相手の方向」にする
+      compassNeedleDeg = (bearingDeg - deviceHeading + 360) % 360;
+    } else {
+      // 端末の向きが取れないときは、北基準の bearing をそのまま
+      compassNeedleDeg = bearingDeg;
+    }
+  }
 
-    const diff = bearingDeg - deviceHeadingDeg;
-    return ((diff % 360) + 360) % 360;
-  })();
-
-  // =========================
-  // 見た目関連
-  // =========================
   const renderMoodEmoji = (mood) => {
     switch (mood) {
       case "good":
@@ -730,7 +705,7 @@ function App() {
     }
   };
 
-  // 相手の天気から背景テーマを決定
+  // 天気から背景クラス決定
   const getWeatherThemeClass = (weather) => {
     if (!weather) {
       return "app-root app-theme-default";
@@ -936,31 +911,19 @@ function App() {
                   bearing ={" "}
                   {bearingDeg != null ? bearingDeg.toFixed(1) : "null"},{" "}
                   deviceHeading ={" "}
-                  {deviceHeadingDeg != null
-                    ? deviceHeadingDeg.toFixed(1)
+                  {deviceHeading != null
+                    ? deviceHeading.toFixed(1)
                     : "null"}
                 </p>
               </div>
 
-              {/* コンパス有効化ボタン */}
-              <div style={{ marginTop: "12px" }}>
-                <button onClick={handleEnableCompass}>
-                  コンパスを有効にする
-                </button>
-                {compassStatus && (
-                  <p style={{ marginTop: "6px", fontSize: "12px" }}>
-                    {compassStatus}
-                  </p>
-                )}
-              </div>
-
-              {/* コンパスUI（リアルタイム） */}
+              {/* コンパスUI */}
               <div className="compass-wrapper">
                 <div className="compass-circle">
                   <div
                     className="compass-needle"
                     style={{
-                      transform: `translate(-50%, -50%) rotate(${needleAngleDeg}deg)`,
+                      transform: `translate(-50%, -50%) rotate(${compassNeedleDeg}deg)`,
                     }}
                   />
                   <div className="compass-center-dot" />
