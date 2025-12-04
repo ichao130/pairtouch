@@ -9,8 +9,6 @@ import {
   getRedirectResult,
   onAuthStateChanged,
   signOut,
-  setPersistence,
-  browserLocalPersistence,
 } from "firebase/auth";
 import { getToken } from "firebase/messaging";
 
@@ -51,102 +49,107 @@ function App() {
     "BJiOsiIH9N8Bpo4CfOlnH-lR_RMWT9ei8FNG8EuApjTg-33IAd0ondpiMVZvuy7M0eYA-XpGpefcaK1FPWorCuc";
 
   // =========================
+  // redirect ログインの結果を一度だけ確認
+  // =========================
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await getRedirectResult(auth);
+        if (result) {
+          console.log("redirect ログイン成功:", result.user);
+          // onAuthStateChanged が後追いで走るので、ここではログだけ
+        }
+      } catch (e) {
+        console.error("getRedirectResult エラー:", e);
+      }
+    })();
+  }, []);
+
+  // =========================
   // ログイン状態の監視
   // =========================
-    useEffect(() => {
-      // ▼ 永続化
-      setPersistence(auth, browserLocalPersistence).catch((e) => {
-        console.warn("setPersistence error:", e);
-      });
-
-      // ▼ redirect の結果を回収
-      getRedirectResult(auth)
-        .then((result) => {
-          if (result && result.user) {
-            console.log(
-              "getRedirectResult: user logged in via redirect:",
-              result.user.uid
-            );
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
+      (async () => {
+        try {
+          if (!firebaseUser) {
+            console.log("auth: ログアウト状態");
+            setUser(null);
+            setCurrentMood(null);
+            setPairId(null);
+            setPartnerUid(null);
+            setPartnerMood(null);
+            setPartnerName("");
+            setPartnerLastOpenedAt(null);
+            setPartnerWeather(null);
+            setMyLocation(null);
+            setPartnerLocation(null);
+            setDistanceKm(null);
+            setDirectionLabel("");
+            setBearingDeg(null);
+            setPairStatusMessage("");
+            setLocStatus("");
+            return;
           }
-        })
-        .catch((e) => {
-          console.error("getRedirectResult error:", e);
-        });
 
-      const unsub = onAuthStateChanged(auth, (firebaseUser) => {
-        (async () => {
+          console.log("auth: ログインユーザー:", firebaseUser.uid);
+          setUser(firebaseUser);
+
+          const userRef = doc(db, "users", firebaseUser.uid);
+
+          let data;
           try {
-            if (!firebaseUser) {
-              console.log("auth: ログアウト状態");
-              setUser(null);
-              setCurrentMood(null);
-              setPairId(null);
-              setPartnerUid(null);
-              setPartnerMood(null);
-              setPartnerName("");
-              setPartnerLastOpenedAt(null);
-              setPartnerWeather(null);
-              setMyLocation(null);
-              setPartnerLocation(null);
-              setDistanceKm(null);
-              setDirectionLabel("");
-              setBearingDeg(null);
-              setPairStatusMessage("");
-              setLocStatus("");
-              setLoading(false);
-              return;
-            }
-
-            console.log("auth: ログインユーザー:", firebaseUser.uid);
-            setUser(firebaseUser);
-
-            const userRef = doc(db, "users", firebaseUser.uid);
-
-            let data;
-            try {
-              const snap = await getDoc(userRef);
-              if (!snap.exists()) {
-                data = {
-                  uid: firebaseUser.uid,
-                  displayName: firebaseUser.displayName ?? "",
-                  iconMoodToday: null,
-                  lastOpenedAt: new Date(),
-                  location: null,
-                  pairId: null,
-                };
-                await setDoc(userRef, data);
-              } else {
-                data = snap.data();
-                await setDoc(
-                  userRef,
-                  { lastOpenedAt: new Date() },
-                  { merge: true }
-                );
-              }
-            } catch (e) {
-              console.error("ユーザードキュメント取得でエラー:", e);
+            const snap = await getDoc(userRef);
+            if (!snap.exists()) {
+              // 初回ログイン時：ユーザードキュメント作成
               data = {
                 uid: firebaseUser.uid,
                 displayName: firebaseUser.displayName ?? "",
                 iconMoodToday: null,
-                pairId: null,
+                lastOpenedAt: new Date(),
                 location: null,
+                pairId: null,
               };
+              await setDoc(userRef, data);
+            } else {
+              data = snap.data();
+              // lastOpenedAt だけ更新
+              await setDoc(
+                userRef,
+                { lastOpenedAt: new Date() },
+                { merge: true }
+              );
             }
+          } catch (e) {
+            console.error("ユーザードキュメント取得でエラー:", e);
+            // オフラインなど最低限で続行
+            data = {
+              uid: firebaseUser.uid,
+              displayName: firebaseUser.displayName ?? "",
+              iconMoodToday: null,
+              pairId: null,
+              location: null,
+            };
+          }
 
-            setCurrentMood(data.iconMoodToday ?? null);
+          // 自分の調子
+          setCurrentMood(data.iconMoodToday ?? null);
 
-            const pId = data.pairId ?? null;
-            setPairId(pId);
-            setPairStatusMessage("");
+          // ペアID
+          const pId = data.pairId ?? null;
+          setPairId(pId);
+          setPairStatusMessage("");
 
-            // ===== アプリを開いたとき自動で位置情報取得 =====
-            if ("geolocation" in navigator) {
-              navigator.geolocation.getCurrentPosition(
-                async (pos) => {
-                  const { latitude, longitude } = pos.coords;
+          // アプリを開いたタイミングで一度だけ自動位置取得
+          if (typeof navigator !== "undefined" && "geolocation" in navigator) {
+            navigator.geolocation.getCurrentPosition(
+              async (pos) => {
+                const { latitude, longitude } = pos.coords;
 
-                  const userRef = doc(db, "users", firebaseUser.uid);
+                const loc = { lat: latitude, lng: longitude };
+                setMyLocation(loc);
+
+                try {
                   await setDoc(
                     userRef,
                     {
@@ -158,53 +161,66 @@ function App() {
                     },
                     { merge: true }
                   );
-
-                  setMyLocation({ lat: latitude, lng: longitude });
                   console.log("自動位置取得 OK:", latitude, longitude);
-                },
-                (err) => {
-                  console.warn("自動位置取得エラー:", err);
-                },
-                { enableHighAccuracy: true, timeout: 7000 }
-              );
-            }
-
-            if (
-              data.location &&
-              typeof data.location.lat === "number" &&
-              typeof data.location.lng === "number"
-            ) {
-              setMyLocation({
-                lat: data.location.lat,
-                lng: data.location.lng,
-              });
-            } else {
-              setMyLocation(null);
-            }
-          } catch (e) {
-            console.error("onAuthStateChanged 内でエラー:", e);
-          } finally {
-            setLoading(false);
+                } catch (e) {
+                  console.warn("自動位置保存エラー:", e);
+                }
+              },
+              (err) => {
+                console.warn("自動位置取得エラー:", err);
+              },
+              { enableHighAccuracy: true, timeout: 7000 }
+            );
           }
-        })();
-      });
 
-      return () => unsub();
-    }, []);
+          // Firestore 上にすでに location があれば反映
+          if (
+            data.location &&
+            typeof data.location.lat === "number" &&
+            typeof data.location.lng === "number"
+          ) {
+            setMyLocation({
+              lat: data.location.lat,
+              lng: data.location.lng,
+            });
+          } else {
+            setMyLocation(null);
+          }
+        } catch (e) {
+          console.error("onAuthStateChanged 内でエラー:", e);
+        } finally {
+          setLoading(false);
+        }
+      })();
+    });
+
+    return () => unsub();
+  }, []);
 
   // =========================
   // ログイン / ログアウト
   // =========================
 
-    const handleSignIn = async () => {
-      try {
-        console.log("handleSignIn: use signInWithRedirect (all env)");
+  const handleSignIn = async () => {
+    try {
+      const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+      const isIOS = /iPhone|iPad|iPod/i.test(ua);
+      const isStandalone =
+        typeof window !== "undefined" &&
+        (window.matchMedia("(display-mode: standalone)").matches ||
+          window.navigator.standalone === true);
+
+      // iOS の PWA (standalone) では redirect を使う
+      if (isIOS && isStandalone) {
         await signInWithRedirect(auth, googleProvider);
-      } catch (e) {
-        console.error("handleSignIn error:", e);
-        alert("ログインに失敗しました");
+      } else {
+        await signInWithPopup(auth, googleProvider);
       }
-    };
+    } catch (e) {
+      console.error("ログインエラー:", e);
+      alert("ログインに失敗しました");
+    }
+  };
 
   const handleSignOut = async () => {
     await signOut(auth);
