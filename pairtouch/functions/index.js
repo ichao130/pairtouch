@@ -1,297 +1,582 @@
-// functions/index.js
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+const express = require("express");
+const cors = require("cors");
+const crypto = require("crypto");
 
-// --- v2 Firestore トリガー & ロガー ---
-const { onDocumentWritten } = require("firebase-functions/v2/firestore");
-const logger = require("firebase-functions/logger");
+if (!admin.apps.length) admin.initializeApp();
+const db = admin.firestore();
 
-// --- Admin SDK ---
-const { initializeApp } = require("firebase-admin/app");
-const { getFirestore, FieldValue } = require("firebase-admin/firestore");
-const { getMessaging } = require("firebase-admin/messaging");
+const app = express();
+app.use(cors({ origin: true }));
+app.use(express.json());
 
-// Admin 初期化
-initializeApp();
 
-// ★ Firestore named DB（pairtouch01）
-const db = getFirestore("pairtouch01");
+app.post("/api/registerPushToken", requireDevice, async (req, res) => {
+  try {
+    const { token } = req.body || {};
+    if (!token) return res.status(400).json({ error: "missing token" });
 
-// ★ Admin Messaging (FCM)
-const messaging = getMessaging();
-
-// ★ OpenWeather APIキー（functions/.env か GCP 環境変数）
-const OPENWEATHER_KEY = process.env.OPENWEATHER_API_KEY;
-
-if (!OPENWEATHER_KEY) {
-  logger.warn(
-    "[functions] OPENWEATHER_API_KEY が設定されていません。天気更新は失敗します。"
-  );
-}
-
-/**
- * ① users/{uid}.location が変わったときに OpenWeather から天気取得
- *    → users/{uid}.weather を更新
- */
-exports.locationWeatherUpdater = onDocumentWritten(
-  {
-    document: "users/{uid}",
-    database: "pairtouch01",
-    region: "us-central1",
-  },
-  async (event) => {
-    const uid = event.params.uid;
-
-    const beforeSnap = event.data.before;
-    const afterSnap = event.data.after;
-
-    // ドキュメント削除時などは何もしない
-    if (!afterSnap.exists) {
-      logger.info("Document deleted, skip weather", { uid });
-      return;
-    }
-
-    const after = afterSnap.data();
-    const before = beforeSnap.exists ? beforeSnap.data() : null;
-
-    const loc = after.location;
-
-    // location がない場合はスキップ
-    if (!loc || typeof loc.lat !== "number" || typeof loc.lng !== "number") {
-      logger.info("No location field, skip weather update", { uid });
-      return;
-    }
-
-    // location が前と同じならスキップ
-    if (
-      before &&
-      before.location &&
-      before.location.lat === loc.lat &&
-      before.location.lng === loc.lng
-    ) {
-      logger.info("Location unchanged, skip weather update", { uid });
-      return;
-    }
-
-    if (!OPENWEATHER_KEY) {
-      logger.error("OPENWEATHER_API_KEY is not set");
-      return;
-    }
-
-    const lat = loc.lat;
-    const lon = loc.lng;
-
-    const url =
-      `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}` +
-      `&appid=${OPENWEATHER_KEY}&units=metric&lang=ja`;
-
-    logger.info("Calling OpenWeather", { uid, lat, lon, url });
-
-    let json;
-    try {
-      const res = await fetch(url);
-
-      const rawText = await res.text();
-
-      logger.info("OpenWeather raw response (head 200)", {
-        uid,
-        head: rawText.slice(0, 200),
-      });
-
-      if (!res.ok) {
-        logger.error("OpenWeather API error", {
-          uid,
-          status: res.status,
-          head: rawText.slice(0, 200),
-        });
-        return;
-      }
-
-      try {
-        json = JSON.parse(rawText);
-      } catch (parseErr) {
-        logger.error("OpenWeather JSON parse error", {
-          uid,
-          error: parseErr.toString(),
-          head500: rawText.slice(0, 500),
-        });
-        return;
-      }
-    } catch (e) {
-      logger.error("Failed to call OpenWeather", {
-        uid,
-        error: e.toString(),
-      });
-      return;
-    }
-
-    const weatherArray = json.weather || [];
-    const main = weatherArray[0]?.main || "Unknown"; // "Clear" / "Clouds" / ...
-    const tempC =
-      typeof json.main?.temp === "number" ? json.main.temp : null;
-    const icon = weatherArray[0]?.icon || null;
-
-    // 昼 / 夜の判定（UTC 秒基準）
-    const dt = json.dt;
-    const sunrise = json.sys?.sunrise;
-    const sunset = json.sys?.sunset;
-
-    let isDaytime = null;
-    if (
-      typeof dt === "number" &&
-      typeof sunrise === "number" &&
-      typeof sunset === "number"
-    ) {
-      isDaytime = dt >= sunrise && dt < sunset;
-    }
-
-    // condition をざっくりカテゴリ化
-    let condition = "unknown";
-    const mainLower = (main || "").toLowerCase();
-    if (mainLower.includes("clear")) {
-      condition = "clear";
-    } else if (mainLower.includes("cloud")) {
-      condition = "cloudy";
-    } else if (mainLower.includes("rain") || mainLower.includes("drizzle")) {
-      condition = "rain";
-    } else if (mainLower.includes("thunder")) {
-      condition = "storm";
-    } else if (mainLower.includes("snow")) {
-      condition = "snow";
-    }
-
-    const weatherData = {
-      condition,      // "clear" | "cloudy" | "rain" | "storm" | "snow" | "unknown"
-      isDaytime,      // true | false | null
-      tempC,          // 気温（℃）
-      icon,           // OpenWeather のアイコンコード（例: "01d"）
-      rawMain: main,  // デバッグ用
-      updatedAt: FieldValue.serverTimestamp(),
-    };
-
-    logger.info("Saving weather to Firestore", { uid, weatherData });
-
-    await db.doc(`users/${uid}`).set(
-      { weather: weatherData },
+    await req.deviceRef.set(
+      {
+        pushTokens: admin.firestore.FieldValue.arrayUnion(String(token)),
+        pushUpdatedAt: nowTs(),
+      },
       { merge: true }
     );
 
-    return;
+    res.status(204).send();
+  } catch (e) {
+    console.error("/api/registerPushToken error", e);
+    res.status(500).json({ error: "registerPushToken failed" });
   }
-);
+});
 
-/**
- * ② users/{uid}.lastOpenedAt が変わったときに、
- *    ペア相手に FCM で「開いたよ」通知を送る
- */
-exports.notifyPartnerWhenOpened = onDocumentWritten(
-  {
-    document: "users/{uid}",
-    database: "pairtouch01",
-    region: "us-central1",
-  },
-  async (event) => {
-    const uid = event.params.uid;
 
-    const beforeSnap = event.data.before;
-    const afterSnap = event.data.after;
+// ======================
+// util: base64url / hash
+// ======================
+function toBase64Url(buf) {
+  return buf
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
 
-    if (!afterSnap.exists) {
-      logger.info("User doc deleted, skip notify", { uid });
-      return;
-    }
+function sha256Base64Url(str) {
+  return toBase64Url(crypto.createHash("sha256").update(str).digest());
+}
 
-    const after = afterSnap.data();
-    const before = beforeSnap.exists ? beforeSnap.data() : null;
+// Invite向け：紛らわしい文字を除いた Base32（A-Z2-7）
+function randomBase32(len) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ234567"; // I, O を除外
+  const bytes = crypto.randomBytes(len);
+  let out = "";
+  for (let i = 0; i < len; i++) {
+    out += alphabet[bytes[i] % alphabet.length];
+  }
+  return out;
+}
 
-    // --- lastOpenedAt の変化チェック ---
-    const getMillis = (ts) =>
-      ts && typeof ts.toMillis === "function" ? ts.toMillis() : null;
+function formatInvite(codeRaw) {
+  // 8文字 -> 4-4
+  return `${codeRaw.slice(0, 4)}-${codeRaw.slice(4, 8)}`;
+}
 
-    const afterOpenedMs = getMillis(after.lastOpenedAt);
-    const beforeOpenedMs = getMillis(before?.lastOpenedAt);
+function nowTs() {
+  return admin.firestore.FieldValue.serverTimestamp();
+}
 
-    if (!afterOpenedMs) {
-      logger.info("No lastOpenedAt, skip notify", { uid });
-      return;
-    }
+function formatJst(ts) {
+  if (!ts) return null;
+  const d = ts instanceof admin.firestore.Timestamp ? ts.toDate() : new Date(ts);
+  return d.toLocaleString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
-    if (beforeOpenedMs && beforeOpenedMs === afterOpenedMs) {
-      logger.info("lastOpenedAt unchanged, skip notify", { uid });
-      return;
-    }
+// ======================
+// util: geo
+// ======================
+function toRad(deg) {
+  return (deg * Math.PI) / 180;
+}
 
-    // --- pairId から partnerUid を取得 ---
-    const pairId = after.pairId;
-    if (!pairId) {
-      logger.info("No pairId, skip notify", { uid });
-      return;
-    }
+function calcDistanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const rLat1 = toRad(lat1);
+  const rLat2 = toRad(lat2);
 
-    const pairSnap = await db.doc(`pairs/${pairId}`).get();
-    if (!pairSnap.exists) {
-      logger.info("pair doc not found, skip notify", { uid, pairId });
-      return;
-    }
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(rLat1) * Math.cos(rLat2) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 
-    const pairData = pairSnap.data();
-    const partnerUid =
-      pairData.ownerUid === uid ? pairData.partnerUid : pairData.ownerUid;
+function calcBearing(lat1, lon1, lat2, lon2) {
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const λ1 = toRad(lon1);
+  const λ2 = toRad(lon2);
 
-    if (!partnerUid) {
-      logger.info("No partnerUid in pair, skip notify", { uid, pairId });
-      return;
-    }
+  const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
+  const x =
+    Math.cos(φ1) * Math.sin(φ2) -
+    Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
 
-    // --- 相手の fcmTokens を取得 ---
-    const partnerSnap = await db.doc(`users/${partnerUid}`).get();
-    if (!partnerSnap.exists) {
-      logger.info("partner user doc not found, skip notify", {
-        uid,
-        partnerUid,
-      });
-      return;
-    }
+  const θ = Math.atan2(y, x);
+  const bearing = ((θ * 180) / Math.PI + 360) % 360;
+  return bearing;
+}
 
-    const partnerData = partnerSnap.data();
-    const fcmTokens = partnerData.fcmTokens || {};
-    const tokens = Object.keys(fcmTokens).filter((t) => fcmTokens[t]);
+function bearingToDirectionText(bearingDeg) {
+  const dirs = [
+    "北の方角",
+    "北東の方角",
+    "東の方角",
+    "南東の方角",
+    "南の方角",
+    "南西の方角",
+    "西の方角",
+    "北西の方角",
+  ];
+  const index = Math.round(bearingDeg / 45) % 8;
+  return dirs[index];
+}
 
-    if (!tokens.length) {
-      logger.info("No FCM tokens for partner, skip notify", {
-        uid,
-        partnerUid,
-      });
-      return;
-    }
+function distanceToRoughText(km) {
+  if (km < 0.3) return "すぐ近く（500m以内）";
+  if (km < 1) return "かなり近く（1km以内）";
+  if (km < 5) return `だいたい ${km.toFixed(1)}km くらい`;
+  if (km < 20) return `少し離れていて ${km.toFixed(1)}km くらい`;
+  return `だいぶ遠くて 約 ${Math.round(km)}km`;
+}
 
-    const fromName = after.displayName || "相手";
+// ======================
+// auth middleware (Device Key)
+// ======================
+async function requireDevice(req, res, next) {
+  try {
+    const auth = req.headers.authorization || "";
+    const m = auth.match(/^Device (.+)$/);
+    if (!m) return res.status(401).json({ error: "missing device key" });
 
-    const message = {
-      tokens,
-      notification: {
-        title: "pair touch",
-        body: `${fromName} が pair touch をひらきました。`,
+    const deviceKey = m[1].trim();
+    const deviceId = sha256Base64Url(deviceKey);
+
+    const ref = db.collection("devices").doc(deviceId);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(401).json({ error: "unknown device" });
+
+    const data = snap.data();
+    if (data.revokedAt) return res.status(401).json({ error: "revoked device" });
+
+    req.deviceId = deviceId;
+    req.deviceRef = ref;
+    req.device = data;
+    next();
+  } catch (e) {
+    console.error("requireDevice error", e);
+    res.status(500).json({ error: "auth error" });
+  }
+}
+
+// ======================
+// 1) register device (first run)
+// ======================
+app.post("/api/registerDevice", async (req, res) => {
+  try {
+    // deviceKey: 32 bytes random, base64url
+    const deviceKey = toBase64Url(crypto.randomBytes(32));
+    const deviceId = sha256Base64Url(deviceKey);
+
+    // recoveryCode: 12 chars base32 -> 4-4-4
+    const rRaw = randomBase32(12);
+    const recoveryCode = `${rRaw.slice(0, 4)}-${rRaw.slice(4, 8)}-${rRaw.slice(8, 12)}`;
+    const recoveryHash = sha256Base64Url(recoveryCode);
+
+    const ref = db.collection("devices").doc(deviceId);
+    await ref.set(
+      {
+        createdAt: nowTs(),
+        deviceId,
+        recoveryHash,
+        pairId: null,
+        lastOpenedAt: null,
+        lastLat: null,
+        lastLng: null,
+        lastMood: null,
+        lastUpdatedAt: null,
+        revokedAt: null,
       },
-      data: {
-        type: "partner_opened",
-        fromUid: uid,
-        fromName,
+      { merge: false }
+    );
+
+    res.json({
+      deviceKey,
+      recoveryCode, // 初回だけ画面に出して控えてもらう
+    });
+  } catch (e) {
+    console.error("/api/registerDevice error", e);
+    res.status(500).json({ error: "register failed" });
+  }
+});
+
+// ======================
+// 2) recover device (when storage wiped)
+// ======================
+app.post("/api/recoverDevice", async (req, res) => {
+  try {
+    const { recoveryCode } = req.body || {};
+    if (!recoveryCode) return res.status(400).json({ error: "missing recoveryCode" });
+
+    const recoveryHash = sha256Base64Url(String(recoveryCode).trim().toUpperCase());
+
+    const q = await db
+      .collection("devices")
+      .where("recoveryHash", "==", recoveryHash)
+      .where("revokedAt", "==", null)
+      .limit(1)
+      .get();
+
+    if (q.empty) return res.status(404).json({ error: "not found" });
+
+    const oldSnap = q.docs[0];
+    const old = oldSnap.data();
+
+    // 旧端末を revoke して、新しい deviceKey を発行
+    const newDeviceKey = toBase64Url(crypto.randomBytes(32));
+    const newDeviceId = sha256Base64Url(newDeviceKey);
+
+    const rRaw = randomBase32(12);
+    const newRecoveryCode = `${rRaw.slice(0, 4)}-${rRaw.slice(4, 8)}-${rRaw.slice(8, 12)}`;
+    const newRecoveryHash = sha256Base64Url(newRecoveryCode);
+
+    const batch = db.batch();
+    batch.set(oldSnap.ref, { revokedAt: nowTs() }, { merge: true });
+    batch.set(
+      db.collection("devices").doc(newDeviceId),
+      {
+        createdAt: nowTs(),
+        deviceId: newDeviceId,
+        recoveryHash: newRecoveryHash,
+        pairId: old.pairId || null,
+        lastOpenedAt: old.lastOpenedAt || null,
+        lastLat: old.lastLat ?? null,
+        lastLng: old.lastLng ?? null,
+        lastMood: old.lastMood ?? null,
+        lastUpdatedAt: old.lastUpdatedAt || null,
+        revokedAt: null,
       },
+      { merge: false }
+    );
+
+    await batch.commit();
+
+    res.json({
+      deviceKey: newDeviceKey,
+      recoveryCode: newRecoveryCode,
+    });
+  } catch (e) {
+    console.error("/api/recoverDevice error", e);
+    res.status(500).json({ error: "recover failed" });
+  }
+});
+
+// ======================
+// 3) create invite (LINEで送る)
+// ======================
+app.post("/api/createInvite", requireDevice, async (req, res) => {
+  try {
+    // 8 chars base32 -> 4-4
+    let code = "";
+    for (let i = 0; i < 5; i++) {
+      const raw = randomBase32(8);
+      const formatted = formatInvite(raw);
+      const ref = db.collection("invites").doc(formatted);
+      const exists = await ref.get();
+      if (!exists.exists) {
+        code = formatted;
+        break;
+      }
+    }
+    if (!code) return res.status(500).json({ error: "failed to generate invite" });
+
+    const expiresHours = 24;
+    const expiresAt = admin.firestore.Timestamp.fromDate(
+      new Date(Date.now() + expiresHours * 60 * 60 * 1000)
+    );
+
+    await db.collection("invites").doc(code).set({
+      createdAt: nowTs(),
+      expiresAt,
+      createdByDeviceId: req.deviceId,
+      usedAt: null,
+      usedByDeviceId: null,
+      pairId: null,
+    });
+
+    const message =
+      `ペア招待コード：${code}\n` +
+      `有効期限：${expiresHours}時間\n` +
+      `アプリで「招待コード入力」に貼り付けてね`;
+
+    res.json({ inviteCode: code, message });
+  } catch (e) {
+    console.error("/api/createInvite error", e);
+    res.status(500).json({ error: "createInvite failed" });
+  }
+});
+
+// ======================
+// 4) accept invite (コード入力でペア作成)
+// ======================
+app.post("/api/acceptInvite", requireDevice, async (req, res) => {
+  try {
+    const { inviteCode } = req.body || {};
+    const code = String(inviteCode || "")
+      .trim()
+      .toUpperCase();
+
+    if (!code) return res.status(400).json({ error: "missing inviteCode" });
+
+    const inviteRef = db.collection("invites").doc(code);
+    const inviteSnap = await inviteRef.get();
+    if (!inviteSnap.exists) return res.status(404).json({ error: "invalid invite" });
+
+    const invite = inviteSnap.data();
+    if (invite.usedAt) return res.status(409).json({ error: "invite already used" });
+
+    const now = new Date();
+    if (invite.expiresAt && invite.expiresAt.toDate() < now) {
+      return res.status(410).json({ error: "invite expired" });
+    }
+
+    const creator = invite.createdByDeviceId;
+    if (!creator) return res.status(400).json({ error: "bad invite" });
+    if (creator === req.deviceId) return res.status(400).json({ error: "cannot pair with self" });
+
+    // creator の device が生きてるか確認
+    const creatorSnap = await db.collection("devices").doc(creator).get();
+    if (!creatorSnap.exists) return res.status(404).json({ error: "creator not found" });
+    const creatorDev = creatorSnap.data();
+    if (creatorDev.revokedAt) return res.status(409).json({ error: "creator revoked" });
+
+    // ペア作成
+    const pairRef = db.collection("pairs").doc();
+    const pairId = pairRef.id;
+
+    const batch = db.batch();
+
+    batch.set(pairRef, {
+      createdAt: nowTs(),
+      status: "active",
+      deviceAId: creator,
+      deviceBId: req.deviceId,
+    });
+
+    batch.set(inviteRef, {
+      usedAt: nowTs(),
+      usedByDeviceId: req.deviceId,
+      pairId,
+    }, { merge: true });
+
+    batch.set(db.collection("devices").doc(creator), { pairId }, { merge: true });
+    batch.set(db.collection("devices").doc(req.deviceId), { pairId }, { merge: true });
+
+    await batch.commit();
+
+    res.json({ pairId });
+  } catch (e) {
+    console.error("/api/acceptInvite error", e);
+    res.status(500).json({ error: "acceptInvite failed" });
+  }
+});
+
+// ======================
+// 5) opened (アプリを開いたよ)
+// ======================
+app.post("/api/opened", requireDevice, async (req, res) => {
+  try {
+    const device = req.device; // requireDevice で取得済み
+
+    // pairs/{pairId} に lastNotifiedAt を持たせる
+    if (pair.lastNotifiedAt && Date.now() - pair.lastNotifiedAt.toMillis() < 5 * 60 * 1000) {
+      return res.status(204).send();
+    }
+
+    // ========= ① レート制限（最初に） =========
+    if (
+      device.lastOpenedAt &&
+      Date.now() - device.lastOpenedAt.toMillis() < 5 * 60 * 1000
+    ) {
+      // 5分以内は何もせず終了（通知も送らない）
+      return res.status(204).send();
+    }
+
+    // ========= ② Firestore 更新 =========
+    await req.deviceRef.set(
+      { lastOpenedAt: nowTs() },
+      { merge: true }
+    );
+
+    // ========= ③ 相手へ通知 =========
+    if (device.pairId) {
+      const pairSnap = await db.collection("pairs").doc(device.pairId).get();
+      if (pairSnap.exists) {
+        const pair = pairSnap.data();
+        const otherId =
+          pair.deviceAId === req.deviceId
+            ? pair.deviceBId
+            : pair.deviceAId;
+
+        if (otherId) {
+          await sendPushToDevice(
+            otherId,
+            "pair distance",
+            "相手がアプリを開きました",
+            { type: "opened" }
+          );
+        }
+      }
+    }
+
+    return res.status(204).send();
+  } catch (e) {
+    console.error("/api/opened error", e);
+    return res.status(500).json({ error: "opened failed" });
+  }
+  
+});
+
+// ======================
+// 6) update mood
+// ======================
+app.post("/api/updateMood", requireDevice, async (req, res) => {
+  try {
+    const { mood } = req.body || {};
+    if (!mood) return res.status(400).json({ error: "missing mood" });
+
+    await req.deviceRef.set({ lastMood: String(mood) }, { merge: true });
+    res.status(204).send();
+  } catch (e) {
+    console.error("/api/updateMood error", e);
+    res.status(500).json({ error: "updateMood failed" });
+  }
+});
+
+// ======================
+// 7) update location (and return computed state)
+// ======================
+app.post("/api/updateLocation", requireDevice, async (req, res) => {
+  try {
+    const { lat, lng, mood } = req.body || {};
+    if (typeof lat !== "number" || typeof lng !== "number") {
+      return res.status(400).json({ error: "lat/lng must be number" });
+    }
+
+    const update = {
+      lastLat: lat,
+      lastLng: lng,
+      lastUpdatedAt: nowTs(),
     };
+    if (mood) update.lastMood = String(mood);
 
-    try {
-      const response = await messaging.sendEachForMulticast(message);
-      logger.info("Sent FCM to partner", {
-        fromUid: uid,
-        toUid: partnerUid,
-        successCount: response.successCount,
-        failureCount: response.failureCount,
-      });
-    } catch (err) {
-      logger.error("Failed to send FCM", {
-        fromUid: uid,
-        toUid: partnerUid,
-        error: err.toString(),
-      });
+    await req.deviceRef.set(update, { merge: true });
+
+    // stateを返す
+    const state = await buildState(req.deviceId);
+    res.json(state);
+  } catch (e) {
+    console.error("/api/updateLocation error", e);
+    res.status(500).json({ error: "updateLocation failed" });
+  }
+});
+
+// ======================
+// 8) state
+// ======================
+app.get("/api/state", requireDevice, async (req, res) => {
+  try {
+    const state = await buildState(req.deviceId);
+    res.json(state);
+  } catch (e) {
+    console.error("/api/state error", e);
+    res.status(500).json({ error: "state failed" });
+  }
+});
+
+// ======================
+// 9) unpair (解除)
+// ======================
+app.post("/api/unpair", requireDevice, async (req, res) => {
+  try {
+    const deviceId = req.deviceId;
+    const mySnap = await db.collection("devices").doc(deviceId).get();
+    const my = mySnap.data();
+    if (!my.pairId) return res.status(204).send();
+
+    const pairRef = db.collection("pairs").doc(my.pairId);
+    const pairSnap = await pairRef.get();
+    if (!pairSnap.exists) {
+      await db.collection("devices").doc(deviceId).set({ pairId: null }, { merge: true });
+      return res.status(204).send();
+    }
+
+    const pair = pairSnap.data();
+    const otherId = pair.deviceAId === deviceId ? pair.deviceBId : pair.deviceAId;
+
+    const batch = db.batch();
+    batch.set(pairRef, { status: "ended", endedAt: nowTs() }, { merge: true });
+    batch.set(db.collection("devices").doc(deviceId), { pairId: null }, { merge: true });
+    if (otherId) batch.set(db.collection("devices").doc(otherId), { pairId: null }, { merge: true });
+    await batch.commit();
+
+    res.status(204).send();
+  } catch (e) {
+    console.error("/api/unpair error", e);
+    res.status(500).json({ error: "unpair failed" });
+  }
+});
+
+// ============
+// helper: state build
+// ============
+async function buildState(deviceId) {
+  const myRef = db.collection("devices").doc(deviceId);
+  const mySnap = await myRef.get();
+  const my = mySnap.data();
+
+  let partner = null;
+
+  if (my.pairId) {
+    const pairSnap = await db.collection("pairs").doc(my.pairId).get();
+    if (pairSnap.exists) {
+      const pair = pairSnap.data();
+      const otherId = pair.deviceAId === deviceId ? pair.deviceBId : pair.deviceAId;
+      if (otherId) {
+        const pSnap = await db.collection("devices").doc(otherId).get();
+        if (pSnap.exists) partner = pSnap.data();
+      }
     }
   }
-);
+
+  let directionText = "----";
+  let distanceText = "----";
+
+  if (
+    partner &&
+    my.lastLat != null &&
+    my.lastLng != null &&
+    partner.lastLat != null &&
+    partner.lastLng != null
+  ) {
+    const km = calcDistanceKm(my.lastLat, my.lastLng, partner.lastLat, partner.lastLng);
+    const bearing = calcBearing(my.lastLat, my.lastLng, partner.lastLat, partner.lastLng);
+    directionText = bearingToDirectionText(bearing);
+    distanceText = distanceToRoughText(km);
+  }
+
+  return {
+    paired: !!my.pairId,
+    pairId: my.pairId || null,
+    directionText,
+    distanceText,
+    lastUpdatedAt: formatJst(my.lastUpdatedAt),
+    myMood: my.lastMood || null,
+    partnerMood: partner ? partner.lastMood || null : null,
+    partnerLastOpenedAt: partner ? formatJst(partner.lastOpenedAt) : null,
+  };
+}
+
+// これで Hosting rewrite から /api/** を全部受けられる
+exports.api = functions.https.onRequest(app);

@@ -1,1022 +1,534 @@
-// src/App.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { getDeviceKey, setDeviceKey, clearDeviceKey } from "./deviceStore";
+import { apiGet, apiPost } from "./api";
+import { setupPushAndRegisterToken } from "./push";
 
-import React, { useEffect, useState } from "react";
-import { doc, setDoc, getDoc, onSnapshot } from "firebase/firestore";
-import { auth, googleProvider, db, messaging } from "./firebase";
-import {
-  signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
-  onAuthStateChanged,
-  signOut,
-} from "firebase/auth";
-import { getToken } from "firebase/messaging";
 
-function App() {
-  const [user, setUser] = useState(null);
-  const [currentMood, setCurrentMood] = useState(null);
-  const [loading, setLoading] = useState(true);
 
-  // ペア関連
-  const [pairId, setPairId] = useState(null);
-  const [joinCodeInput, setJoinCodeInput] = useState("");
-  const [pairStatusMessage, setPairStatusMessage] = useState("");
+const MOOD_OPTIONS = [
+  { key: "great", label: "いいかんじ", emoji: "🙂" },
+  { key: "ok", label: "ふつう", emoji: "😐" },
+  { key: "tired", label: "つかれ気味", emoji: "😵" },
+  { key: "bad", label: "しんどい", emoji: "😣" },
+];
 
-  // 相手（パートナー）の情報
-  const [partnerUid, setPartnerUid] = useState(null);
-  const [partnerMood, setPartnerMood] = useState(null);
-  const [partnerName, setPartnerName] = useState("");
-  const [partnerLastOpenedAt, setPartnerLastOpenedAt] = useState(null);
-  const [partnerWeather, setPartnerWeather] = useState(null);
+const openedOnceRef = useRef(false);
 
-  // 位置情報
-  const [myLocation, setMyLocation] = useState(null); // { lat, lng }
-  const [partnerLocation, setPartnerLocation] = useState(null);
-  const [distanceKm, setDistanceKm] = useState(null);
-  const [directionLabel, setDirectionLabel] = useState("");
-  const [locStatus, setLocStatus] = useState("");
+function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+  // fallback
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand("copy");
+  document.body.removeChild(ta);
+  return Promise.resolve();
+}
 
-  // コンパス用：相手への方位角（0〜360度）
-  const [bearingDeg, setBearingDeg] = useState(null);
-  // 端末の向き（0〜360度, 北=0。右回り）
-  const [deviceHeading, setDeviceHeading] = useState(null);
 
-  // 通知の状態メッセージ
-  const [notifyStatus, setNotifyStatus] = useState("");
+async function handleEnablePush() {
+  try {
+    const r = await setupPushAndRegisterToken();
+    if (!r.enabled) alert(`Push無効：${r.reason}`);
+    else alert("Pushを有効化しました！");
+  } catch (e) {
+    console.error(e);
+    alert("Push設定に失敗しました");
+  }
+}
 
-  // Web Push (FCM) の公開 VAPID キー
-  const VAPID_PUBLIC_KEY =
-    "BJiOsiIH9N8Bpo4CfOlnH-lR_RMWT9ei8FNG8EuApjTg-33IAd0ondpiMVZvuy7M0eYA-XpGpefcaK1FPWorCuc";
+export default function App() {
+  const [booting, setBooting] = useState(true);
+  const [hasKey, setHasKey] = useState(false);
 
-  // =========================
-  // redirect ログインの結果を一度だけ確認
-  // =========================
+  // 初回登録/復旧で表示するコード
+  const [recoveryCodeShown, setRecoveryCodeShown] = useState(null);
+
+  // 状態
+  const [state, setState] = useState(null);
+  const [uiError, setUiError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  // 招待
+  const [inviteMessage, setInviteMessage] = useState(null);
+  const [inviteInput, setInviteInput] = useState("");
+
+  // 調子
+  const myMood = state?.myMood ?? null;
+
+  // 起動時に deviceKey を確認
   useEffect(() => {
     (async () => {
-      try {
-        const result = await getRedirectResult(auth);
-        if (result) {
-          console.log("redirect ログイン成功:", result.user);
-          // onAuthStateChanged が後追いで走るので、ここではログだけ
-        }
-      } catch (e) {
-        console.error("getRedirectResult エラー:", e);
-      }
+      const k = await getDeviceKey();
+      setHasKey(!!k);
+      setBooting(false);
     })();
   }, []);
 
-  // =========================
-  // ログイン状態の監視
-  // =========================
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
-      (async () => {
-        try {
-          if (!firebaseUser) {
-            console.log("auth: ログアウト状態");
-            setUser(null);
-            setCurrentMood(null);
-            setPairId(null);
-            setPartnerUid(null);
-            setPartnerMood(null);
-            setPartnerName("");
-            setPartnerLastOpenedAt(null);
-            setPartnerWeather(null);
-            setMyLocation(null);
-            setPartnerLocation(null);
-            setDistanceKm(null);
-            setDirectionLabel("");
-            setBearingDeg(null);
-            setPairStatusMessage("");
-            setLocStatus("");
-            return;
-          }
+    if (!hasKey) return;
+    if (openedOnceRef.current) return;
 
-          console.log("auth: ログインユーザー:", firebaseUser.uid);
-          setUser(firebaseUser);
+    openedOnceRef.current = true;
 
-          const userRef = doc(db, "users", firebaseUser.uid);
+    apiPost("/api/opened").catch(console.error);
+  }, [hasKey]);
 
-          let data;
-          try {
-            const snap = await getDoc(userRef);
-            if (!snap.exists()) {
-              // 初回ログイン時：ユーザードキュメント作成
-              data = {
-                uid: firebaseUser.uid,
-                displayName: firebaseUser.displayName ?? "",
-                iconMoodToday: null,
-                lastOpenedAt: new Date(),
-                location: null,
-                pairId: null,
-              };
-              await setDoc(userRef, data);
-            } else {
-              data = snap.data();
-              // lastOpenedAt だけ更新
-              await setDoc(
-                userRef,
-                { lastOpenedAt: new Date() },
-                { merge: true }
-              );
-            }
-          } catch (e) {
-            console.error("ユーザードキュメント取得でエラー:", e);
-            // オフラインなど最低限で続行
-            data = {
-              uid: firebaseUser.uid,
-              displayName: firebaseUser.displayName ?? "",
-              iconMoodToday: null,
-              pairId: null,
-              location: null,
-            };
-          }
+  // deviceKey あるなら state 読みにいく（+ opened 1回）
+  const openedOnceRef = useRef(false);
+  useEffect(() => {
+    if (!hasKey) return;
 
-          // 自分の調子
-          setCurrentMood(data.iconMoodToday ?? null);
+    (async () => {
+      try {
+        setUiError(null);
+        const s = await apiGet("/api/state");
+        setState(s);
 
-          // ペアID
-          const pId = data.pairId ?? null;
-          setPairId(pId);
-          setPairStatusMessage("");
-
-          // アプリを開いたタイミングで一度だけ自動位置取得
-          if (typeof navigator !== "undefined" && "geolocation" in navigator) {
-            navigator.geolocation.getCurrentPosition(
-              async (pos) => {
-                const { latitude, longitude } = pos.coords;
-
-                const loc = { lat: latitude, lng: longitude };
-                setMyLocation(loc);
-
-                try {
-                  await setDoc(
-                    userRef,
-                    {
-                      location: {
-                        lat: latitude,
-                        lng: longitude,
-                        updatedAt: new Date(),
-                      },
-                    },
-                    { merge: true }
-                  );
-                  console.log("自動位置取得 OK:", latitude, longitude);
-                } catch (e) {
-                  console.warn("自動位置保存エラー:", e);
-                }
-              },
-              (err) => {
-                console.warn("自動位置取得エラー:", err);
-              },
-              { enableHighAccuracy: true, timeout: 7000 }
-            );
-          }
-
-          // Firestore 上にすでに location があれば反映
-          if (
-            data.location &&
-            typeof data.location.lat === "number" &&
-            typeof data.location.lng === "number"
-          ) {
-            setMyLocation({
-              lat: data.location.lat,
-              lng: data.location.lng,
-            });
-          } else {
-            setMyLocation(null);
-          }
-        } catch (e) {
-          console.error("onAuthStateChanged 内でエラー:", e);
-        } finally {
-          setLoading(false);
+        if (!openedOnceRef.current) {
+          openedOnceRef.current = true;
+          await apiPost("/api/opened");
         }
-      })();
-    });
-
-    return () => unsub();
-  }, []);
-
-  // =========================
-  // ログイン / ログアウト
-  // =========================
-
-  const handleSignIn = async () => {
-    try {
-      const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
-      const isIOS = /iPhone|iPad|iPod/i.test(ua);
-      const isStandalone =
-        typeof window !== "undefined" &&
-        (window.matchMedia("(display-mode: standalone)").matches ||
-          window.navigator.standalone === true);
-
-      // iOS の PWA (standalone) では redirect を使う
-      if (isIOS && isStandalone) {
-        await signInWithRedirect(auth, googleProvider);
-      } else {
-        await signInWithPopup(auth, googleProvider);
+      } catch (e) {
+        console.error(e);
+        setUiError("データ取得に失敗しました（Functions/Hosting接続も確認してね）");
       }
-    } catch (e) {
-      console.error("ログインエラー:", e);
-      alert("ログインに失敗しました");
-    }
-  };
+    })();
+  }, [hasKey]);
 
-  const handleSignOut = async () => {
-    await signOut(auth);
-  };
-
-  // =========================
-  // 調子アイコン（自分）
-  // =========================
-  const handleMoodClick = async (moodCode) => {
-    if (!user) return;
-    setCurrentMood(moodCode);
-
-    const userRef = doc(db, "users", user.uid);
+  // ===== 登録（deviceKey発行） =====
+  async function handleRegister() {
     try {
-      await setDoc(
-        userRef,
-        { iconMoodToday: moodCode },
-        { merge: true }
-      );
+      setBusy(true);
+      setUiError(null);
+      const resp = await fetch("/api/registerDevice", { method: "POST" }).then((r) => r.json());
+      await setDeviceKey(resp.deviceKey);
+      setRecoveryCodeShown(resp.recoveryCode);
+      setHasKey(true);
     } catch (e) {
-      console.error("mood 保存でエラー:", e);
-      alert("調子の保存に失敗しました");
+      console.error(e);
+      setUiError("登録に失敗しました");
+    } finally {
+      setBusy(false);
     }
-  };
+  }
 
-  // =========================
-  // ペア作成 / 参加
-  // =========================
-
-  const handleCreateInvite = async () => {
-    if (!user) return;
-
-    if (pairId) {
-      setPairStatusMessage("すでにペアが設定されています。");
-      return;
-    }
-
-    const code = String(Math.floor(100000 + Math.random() * 900000));
-    const pairRef = doc(db, "pairs", code);
-
-    // 先にUI更新
-    setPairId(code);
-    setPairStatusMessage(
-      "招待コードを作成しました。このコードを相手に伝えてください。"
-    );
-
+  // ===== 復旧（recovery code） =====
+  async function handleRecover() {
     try {
-      await setDoc(pairRef, {
-        id: code,
-        ownerUid: user.uid,
-        partnerUid: null,
-        status: "waiting",
-        createdAt: new Date(),
+      const code = prompt("復旧コード（XXXX-XXXX-XXXX）を入力してください");
+      if (!code) return;
+      setBusy(true);
+      setUiError(null);
+      const resp = await fetch("/api/recoverDevice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recoveryCode: code }),
+      }).then(async (r) => {
+        if (!r.ok) throw new Error("recover failed");
+        return await r.json();
       });
 
-      const userRef = doc(db, "users", user.uid);
-      await setDoc(
-        userRef,
-        { pairId: code },
-        { merge: true }
-      );
+      await setDeviceKey(resp.deviceKey);
+      setRecoveryCodeShown(resp.recoveryCode);
+      setHasKey(true);
     } catch (e) {
-      console.error("招待コード作成でエラー:", e);
-      setPairStatusMessage(
-        "招待コードは画面に表示しましたが、サーバへの保存に失敗しました。（ネットワークを確認して、あとで開き直してみてください）"
-      );
+      console.error(e);
+      setUiError("復旧に失敗しました（コードが違う/無効の可能性）");
+    } finally {
+      setBusy(false);
     }
-  };
+  }
 
-  const handleJoinPair = async () => {
-    if (!user) return;
-    if (!joinCodeInput.trim()) {
-      setPairStatusMessage("招待コードを入力してください。");
-      return;
-    }
-    if (pairId) {
-      setPairStatusMessage("すでにペアが設定されています。");
-      return;
-    }
 
-    const code = joinCodeInput.trim();
-    const pairRef = doc(db, "pairs", code);
 
+  // ===== 招待コード作成 =====
+  async function handleCreateInvite() {
     try {
-      const pairSnap = await getDoc(pairRef);
-      if (!pairSnap.exists()) {
-        setPairStatusMessage("その招待コードは見つかりませんでした。");
-        return;
-      }
-
-      const pairData = pairSnap.data();
-
-      if (pairData.ownerUid === user.uid) {
-        setPairStatusMessage("自分の招待コードを使うことはできません。");
-        return;
-      }
-
-      if (pairData.partnerUid && pairData.status === "active") {
-        setPairStatusMessage("この招待コードはすでに使われています。");
-        return;
-      }
-
-      await setDoc(
-        pairRef,
-        {
-          partnerUid: user.uid,
-          status: "active",
-        },
-        { merge: true }
-      );
-
-      const userRef = doc(db, "users", user.uid);
-      await setDoc(
-        userRef,
-        { pairId: code },
-        { merge: true }
-      );
-
-      setPairId(code);
-      setPairStatusMessage("ペアがつながりました。");
-      setJoinCodeInput("");
+      setBusy(true);
+      setUiError(null);
+      const resp = await apiPost("/api/createInvite", {});
+      setInviteMessage(resp.message);
     } catch (e) {
-      console.error("ペア参加でエラー:", e);
-      alert("ペアの参加に失敗しました");
+      console.error(e);
+      setUiError("招待コード作成に失敗しました");
+    } finally {
+      setBusy(false);
     }
-  };
+  }
 
-  // =========================
-  // ペアの情報監視 → partnerUid 決定
-  // =========================
-  useEffect(() => {
-    if (!user || !pairId) {
-      setPartnerUid(null);
-      setPartnerMood(null);
-      setPartnerName("");
-      setPartnerLastOpenedAt(null);
-      setPartnerWeather(null);
-      setPartnerLocation(null);
-      return;
+  // ===== 招待コード受け取り =====
+  async function handleAcceptInvite() {
+    try {
+      setBusy(true);
+      setUiError(null);
+      const resp = await apiPost("/api/acceptInvite", { inviteCode: inviteInput });
+      // ペアができたので state 再取得
+      const s = await apiGet("/api/state");
+      setState(s);
+      setInviteInput("");
+      setInviteMessage(null);
+    } catch (e) {
+      console.error(e);
+      setUiError("招待コードの受け取りに失敗しました（期限切れ/使用済み/ミス）");
+    } finally {
+      setBusy(false);
     }
+  }
 
-    const pairRef = doc(db, "pairs", pairId);
-    const unsub = onSnapshot(pairRef, (snap) => {
-      if (!snap.exists()) {
-        setPartnerUid(null);
-        setPartnerMood(null);
-        setPartnerName("");
-        setPartnerLastOpenedAt(null);
-        setPartnerWeather(null);
-        setPartnerLocation(null);
-        return;
-      }
-      const data = snap.data();
-      const otherUid =
-        data.ownerUid === user.uid ? data.partnerUid : data.ownerUid;
-
-      if (!otherUid) {
-        setPartnerUid(null);
-        setPartnerMood(null);
-        setPartnerName("");
-        setPartnerLastOpenedAt(null);
-        setPartnerWeather(null);
-        setPartnerLocation(null);
-        return;
-      }
-
-      setPartnerUid(otherUid);
-    });
-
-    return () => unsub();
-  }, [user, pairId]);
-
-  // =========================
-  // パートナーのユーザードキュメント購読
-  // （※ローカル通知は出さない：FCM に任せる）
-  // =========================
-  useEffect(() => {
-    if (!partnerUid) {
-      setPartnerMood(null);
-      setPartnerName("");
-      setPartnerLastOpenedAt(null);
-      setPartnerWeather(null);
-      setPartnerLocation(null);
-      return;
+  // ===== 解除 =====
+  async function handleUnpair() {
+    try {
+      setBusy(true);
+      setUiError(null);
+      await apiPost("/api/unpair", {});
+      const s = await apiGet("/api/state");
+      setState(s);
+      setInviteMessage(null);
+    } catch (e) {
+      console.error(e);
+      setUiError("解除に失敗しました");
+    } finally {
+      setBusy(false);
     }
+  }
 
-    const partnerRef = doc(db, "users", partnerUid);
-    const unsub = onSnapshot(partnerRef, (snap) => {
-      if (!snap.exists()) {
-        setPartnerMood(null);
-        setPartnerName("");
-        setPartnerLastOpenedAt(null);
-        setPartnerWeather(null);
-        setPartnerLocation(null);
-        return;
-      }
-      const data = snap.data();
-      setPartnerMood(data.iconMoodToday ?? null);
-      setPartnerName(data.displayName ?? "");
+  // ===== 調子更新 =====
+  async function handleSelectMood(moodKey) {
+    try {
+      setUiError(null);
+      setState((prev) => ({ ...(prev || {}), myMood: moodKey }));
+      await apiPost("/api/updateMood", { mood: moodKey });
+    } catch (e) {
+      console.error(e);
+      setUiError("調子の更新に失敗しました");
+    }
+  }
 
-      const ts = data.lastOpenedAt;
-      let newOpened = null;
-      if (ts && typeof ts.toDate === "function") {
-        newOpened = ts.toDate();
-      }
-
-      // ここでは「開いたとき通知」は出さない（Functions+FCM に任せる）
-      setPartnerLastOpenedAt(newOpened || null);
-
-      if (
-        data.location &&
-        typeof data.location.lat === "number" &&
-        typeof data.location.lng === "number"
-      ) {
-        setPartnerLocation({
-          lat: data.location.lat,
-          lng: data.location.lng,
-        });
-      } else {
-        setPartnerLocation(null);
-      }
-
-      if (data.weather) {
-        setPartnerWeather(data.weather);
-      } else {
-        setPartnerWeather(null);
-      }
-    });
-
-    return () => unsub();
-  }, [partnerUid]);
-
-  // =========================
-  // 位置情報の取得と保存（ボタン）
-  // =========================
-  const handleUpdateMyLocation = () => {
-    if (!user) return;
-
+  // ===== 距離更新（位置送信） =====
+  async function handleUpdateLocation() {
     if (!("geolocation" in navigator)) {
-      setLocStatus("この端末では位置情報が利用できません。");
+      setUiError("この端末では位置情報が利用できません");
       return;
     }
-
-    setLocStatus("位置情報を取得中…");
+    setBusy(true);
+    setUiError(null);
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
-        const { latitude, longitude } = pos.coords;
-
-        const loc = { lat: latitude, lng: longitude };
-        setMyLocation(loc);
-
         try {
-          const userRef = doc(db, "users", user.uid);
-          await setDoc(
-            userRef,
-            {
-              location: {
-                lat: latitude,
-                lng: longitude,
-                updatedAt: new Date(),
-              },
-            },
-            { merge: true }
-          );
-          setLocStatus("位置情報を共有しました。");
+          const { latitude, longitude } = pos.coords;
+          const s = await apiPost("/api/updateLocation", {
+            lat: latitude,
+            lng: longitude,
+            mood: myMood,
+          });
+          setState(s);
         } catch (e) {
-          console.error("位置情報の保存でエラー:", e);
-          setLocStatus("位置情報の共有に失敗しました。");
+          console.error(e);
+          setUiError("位置情報の送信に失敗しました");
+        } finally {
+          setBusy(false);
         }
       },
       (err) => {
-        console.error("位置情報取得エラー:", err);
-        if (err.code === 1) {
-          setLocStatus("位置情報の利用が許可されていません。設定を確認してください。");
-        } else if (err.code === 2) {
-          setLocStatus("位置情報を取得できませんでした。電波状況などを確認してください。");
-        } else if (err.code === 3) {
-          setLocStatus("位置情報の取得がタイムアウトしました。");
-        } else {
-          setLocStatus("位置情報の取得に失敗しました。");
-        }
+        console.error(err);
+        setUiError(err.code === 1 ? "位置情報が許可されていません" : "位置情報の取得に失敗しました");
+        setBusy(false);
       },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
-  };
-
-  // =========================
-  // 通知（Web Push）の有効化
-  // =========================
-  const handleEnableNotifications = async () => {
-    if (!user) {
-      setNotifyStatus("ログインしてから通知を有効にしてください。");
-      return;
-    }
-
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      setNotifyStatus("このブラウザは通知に対応していません。");
-      return;
-    }
-
-    if (!messaging) {
-      setNotifyStatus("通知機能の初期化に失敗しました。");
-      return;
-    }
-
-    const perm = await Notification.requestPermission();
-    if (perm !== "granted") {
-      setNotifyStatus("通知が許可されませんでした。");
-      return;
-    }
-
-    try {
-      const token = await getToken(messaging, {
-        vapidKey: VAPID_PUBLIC_KEY,
-      });
-
-      if (!token) {
-        setNotifyStatus("通知トークンを取得できませんでした。");
-        return;
-      }
-
-      const userRef = doc(db, "users", user.uid);
-      await setDoc(
-        userRef,
-        {
-          fcmTokens: {
-            [token]: true,
-          },
-        },
-        { merge: true }
-      );
-
-      setNotifyStatus("通知を有効にしました。");
-      console.log("FCM token:", token);
-    } catch (e) {
-      console.error("FCM トークン取得エラー:", e);
-      setNotifyStatus("通知の設定に失敗しました。");
-    }
-  };
-
-  // =========================
-  // 距離・方角の計算
-  // =========================
-  const toRad = (deg) => (deg * Math.PI) / 180;
-
-  const calcDistanceKm = (loc1, loc2) => {
-    const R = 6371;
-    const dLat = toRad(loc2.lat - loc1.lat);
-    const dLng = toRad(loc2.lng - loc1.lng);
-    const lat1 = toRad(loc1.lat);
-    const lat2 = toRad(loc2.lat);
-
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.sin(dLng / 2) *
-        Math.sin(dLng / 2) *
-        Math.cos(lat1) *
-        Math.cos(lat2);
-
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  };
-
-  const calcBearingDeg = (loc1, loc2) => {
-    const lat1 = toRad(loc1.lat);
-    const lat2 = toRad(loc2.lat);
-    const dLng = toRad(loc2.lng - loc1.lng);
-
-    const y = Math.sin(dLng) * Math.cos(lat2);
-    const x =
-      Math.cos(lat1) * Math.sin(lat2) -
-      Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
-
-    const brng = (Math.atan2(y, x) * 180) / Math.PI;
-    return (brng + 360) % 360;
-  };
-
-  const bearingToLabel = (deg) => {
-    const dirs = ["北", "北東", "東", "南東", "南", "南西", "西", "北西", "北"];
-    const idx = Math.round(deg / 45);
-    return dirs[idx];
-  };
-
-  useEffect(() => {
-    if (!myLocation || !partnerLocation) {
-      setDistanceKm(null);
-      setDirectionLabel("");
-      setBearingDeg(null);
-      return;
-    }
-
-    const d = calcDistanceKm(myLocation, partnerLocation);
-    const b = calcBearingDeg(myLocation, partnerLocation);
-    const label = bearingToLabel(b);
-
-    setDistanceKm(d);
-    setDirectionLabel(label);
-    setBearingDeg(b);
-  }, [myLocation, partnerLocation]);
-
-  // =========================
-  // 端末のコンパス（DeviceOrientation）取得
-  // =========================
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const handleOrientation = (event) => {
-      let heading = null;
-
-      // iOS (Safari) 向け webkitCompassHeading
-      const anyEvent = event;
-      if (typeof anyEvent.webkitCompassHeading === "number") {
-        heading = anyEvent.webkitCompassHeading; // 0 = 北
-      } else if (typeof event.alpha === "number") {
-        // 一般ブラウザ：alpha (0〜360, デバイスが向いている方角)
-        heading = 360 - event.alpha; // 北=0 になるよう反転
-      }
-
-      if (heading != null) {
-        const normalized = (heading + 360) % 360;
-        setDeviceHeading(normalized);
-      }
-    };
-
-    // iOS 13+ はユーザー操作で requestPermission が必要
-    const setupListener = () => {
-      if (
-        typeof window.DeviceOrientationEvent !== "undefined" &&
-        typeof window.DeviceOrientationEvent.requestPermission === "function"
-      ) {
-        window.DeviceOrientationEvent.requestPermission()
-          .then((state) => {
-            if (state === "granted") {
-              window.addEventListener("deviceorientation", handleOrientation);
-            } else {
-              console.log("DeviceOrientation permission not granted");
-            }
-          })
-          .catch((err) => {
-            console.warn("DeviceOrientation requestPermission error:", err);
-          });
-      } else if (typeof window.DeviceOrientationEvent !== "undefined") {
-        // Android / PC など
-        window.addEventListener("deviceorientation", handleOrientation);
-      } else {
-        console.log("DeviceOrientationEvent not supported");
-      }
-    };
-
-    // 一旦すぐに試す（PWA で一度許可済みならそのまま動く想定）
-    setupListener();
-
-    return () => {
-      if (typeof window.DeviceOrientationEvent !== "undefined") {
-        window.removeEventListener("deviceorientation", handleOrientation);
-      }
-    };
-  }, []);
-
-  // コンパス針の角度（画面上）
-  let compassNeedleDeg = 0;
-  if (bearingDeg != null) {
-    if (deviceHeading != null) {
-      // 端末の向きを引いて「端末から見た相手の方向」にする
-      compassNeedleDeg = (bearingDeg - deviceHeading + 360) % 360;
-    } else {
-      // 端末の向きが取れないときは、北基準の bearing をそのまま
-      compassNeedleDeg = bearingDeg;
-    }
-  }
-
-  const renderMoodEmoji = (mood) => {
-    switch (mood) {
-      case "good":
-        return "😄";
-      case "ok":
-        return "🙂";
-      case "tired":
-        return "😌";
-      case "bad":
-        return "😢";
-      default:
-        return "—";
-    }
-  };
-
-  const formatDistanceText = (km) => {
-    if (km == null) return "";
-    if (km < 0.05) {
-      return "すぐ近く";
-    } else if (km < 1) {
-      return `${Math.round(km * 1000)} m`;
-    } else if (km < 20) {
-      return `${km.toFixed(1)} km`;
-    } else {
-      return `${Math.round(km)} km`;
-    }
-  };
-
-  // 天気から背景クラス決定
-  const getWeatherThemeClass = (weather) => {
-    if (!weather) {
-      return "app-root app-theme-default";
-    }
-
-    const { condition, isDaytime } = weather;
-    const day = isDaytime === false ? "night" : "day";
-
-    if (condition === "clear") {
-      return day === "day"
-        ? "app-root app-theme-clear-day"
-        : "app-root app-theme-clear-night";
-    }
-
-    if (condition === "cloudy") {
-      return day === "day"
-        ? "app-root app-theme-cloudy-day"
-        : "app-root app-theme-cloudy-night";
-    }
-
-    if (condition === "rain") {
-      return day === "day"
-        ? "app-root app-theme-rain-day"
-        : "app-root app-theme-rain-night";
-    }
-
-    if (condition === "snow") {
-      return "app-root app-theme-snow";
-    }
-
-    return "app-root app-theme-default";
-  };
-
-  // =========================
-  // レンダリング
-  // =========================
-  if (loading) {
-    return (
-      <div className={getWeatherThemeClass(partnerWeather)}>
-        読み込み中...
-      </div>
+      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 15_000 }
     );
   }
 
-  if (!user) {
-    return (
-      <div className={getWeatherThemeClass(partnerWeather)}>
-        <h1>pair touch</h1>
-        <p>
-          会話する余裕がないときでも、相手の気配と距離をそっと感じるための小さなアプリ。
-        </p>
-        <button onClick={handleSignIn}>Googleではじめる</button>
-      </div>
-    );
+  // ===== deviceKey 破棄（デバッグ用） =====
+  async function handleResetDevice() {
+    await clearDeviceKey();
+    setHasKey(false);
+    setState(null);
+    setInviteMessage(null);
+    setInviteInput("");
+    setRecoveryCodeShown(null);
+    openedOnceRef.current = false;
+  }
+
+  const paired = !!state?.paired;
+
+  if (booting) {
+    return <div style={styles.container}>起動中…</div>;
   }
 
   return (
-    <div className={getWeatherThemeClass(partnerWeather)}>
-      <header className="app-header">
-        <div>
-          <h1>pair touch</h1>
-          <p>{user.displayName} さんとしてログイン中</p>
+    <div style={styles.container}>
+      <h1 style={styles.title}>pair distance（鍵運用版）</h1>
+
+      {uiError && <div style={styles.errorBox}>{uiError}</div>}
+
+      {!hasKey && (
+        <div style={styles.card}>
+          <p style={styles.sectionTitle}>はじめに（端末登録）</p>
+          <p style={styles.subText}>
+            Googleログインなしで使うため、端末専用の「鍵」を作ります。
+          </p>
+
+          <button style={styles.button} onClick={handleRegister} disabled={busy}>
+            {busy ? "処理中…" : "この端末を登録する"}
+          </button>
+
+          <button style={styles.buttonOutline} onClick={handleRecover} disabled={busy}>
+            復旧コードで引き継ぐ
+          </button>
         </div>
-        <button onClick={handleSignOut}>ログアウト</button>
-      </header>
+      )}
 
-      <main className="app-main">
-        {/* ペアの状態 */}
-        <section className="section-block">
-          <h2>ペアの状態</h2>
-
-          {pairId ? (
-            <>
-              <p>
-                ペアID（招待コード）：<strong>{pairId}</strong>
+      {hasKey && (
+        <>
+          {recoveryCodeShown && (
+            <div style={styles.card}>
+              <p style={styles.sectionTitle}>復旧コード（大事）</p>
+              <p style={styles.mainText}>
+                <strong>{recoveryCodeShown}</strong>
               </p>
-              <p>
-                このコードを相手に伝えて、相手側で「ペアに参加」から入力してもらってください。
+              <p style={styles.subText}>
+                端末のストレージが消えた時に必要。LINEの自分宛メモに貼るのがオススメ。
               </p>
-            </>
-          ) : (
-            <>
-              <p>まだペアは設定されていません。</p>
-              <button onClick={handleCreateInvite}>招待コードを作る</button>
-
-              <div style={{ marginTop: "12px" }}>
-                <p>もらった招待コードでペアをつなぐ：</p>
-                <input
-                  type="text"
-                  value={joinCodeInput}
-                  onChange={(e) => setJoinCodeInput(e.target.value)}
-                  placeholder="6桁の招待コード"
-                  style={{
-                    padding: "6px 8px",
-                    borderRadius: "8px",
-                    border: "1px solid #ccc",
-                  }}
-                />
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button
-                  style={{ marginLeft: "8px" }}
-                  onClick={handleJoinPair}
+                  style={styles.buttonOutline}
+                  onClick={() => copyToClipboard(recoveryCodeShown)}
                 >
-                  ペアに参加
+                  コードだけコピー
+                </button>
+                <button
+                  style={styles.buttonOutline}
+                  onClick={() =>
+                    copyToClipboard(
+                      `復旧コード：${recoveryCodeShown}\n（pair distance）`
+                    )
+                  }
+                >
+                  文面コピー
+                </button>
+                <button style={styles.buttonOutline} onClick={() => setRecoveryCodeShown(null)}>
+                  了解（非表示）
                 </button>
               </div>
-            </>
+            </div>
           )}
 
-          {pairStatusMessage && (
-            <p style={{ marginTop: "8px", fontSize: "13px" }}>
-              {pairStatusMessage}
-            </p>
-          )}
-
-          {/* 通知オン（実験用） */}
-          <div
-            style={{
-              marginTop: "16px",
-              paddingTop: "8px",
-              borderTop: "1px solid #eee",
-            }}
-          >
-            <p style={{ fontSize: "13px" }}>
-              1日1回くらい、pair touch をひらくように小さくお知らせします。
-              （あとで時間なども選べるようにしていく予定）
-            </p>
-            <button onClick={handleEnableNotifications}>
-              通知をオンにする（実験）
-            </button>
-            {notifyStatus && (
-              <p style={{ marginTop: "8px", fontSize: "12px" }}>
-                {notifyStatus}
-              </p>
-            )}
-          </div>
-        </section>
-
-        {/* 距離と方角 + コンパス */}
-        <section className="section-block">
-          <h2>いまの距離と方角</h2>
-          <button onClick={handleUpdateMyLocation}>
-            いまの位置を共有 / 更新する
-          </button>
-          {locStatus && (
-            <p style={{ marginTop: "8px", fontSize: "13px" }}>{locStatus}</p>
-          )}
-
-          {!pairId && (
-            <p style={{ marginTop: "12px" }}>
-              ペアが設定されると、ここに相手との距離が表示されます。
-            </p>
-          )}
-
-          {pairId && (!myLocation || !partnerLocation) && (
-            <p style={{ marginTop: "12px" }}>
-              距離を出すには、自分と相手の両方が位置情報を共有する必要があります。
-            </p>
-          )}
-
-          {myLocation && (
-            <p style={{ marginTop: "8px", fontSize: "12px", opacity: 0.8 }}>
-              自分の位置（debug）:
-              lat {myLocation.lat.toFixed(5)}, lng{" "}
-              {myLocation.lng.toFixed(5)}
-            </p>
-          )}
-
-          {partnerLocation && (
-            <p style={{ marginTop: "4px", fontSize: "12px", opacity: 0.8 }}>
-              相手の位置（debug）:
-              lat {partnerLocation.lat.toFixed(5)}, lng{" "}
-              {partnerLocation.lng.toFixed(5)}
-            </p>
-          )}
-
-          {pairId && myLocation && partnerLocation && (
-            <>
-              <div style={{ marginTop: "12px" }}>
-                <p>
-                  いまの相手との距離：
-                  <strong>
-                    {distanceKm != null
-                      ? formatDistanceText(distanceKm)
-                      : "計算中…"}
-                  </strong>
-                </p>
-                <p>
-                  方角：
-                  <strong>{directionLabel || "—"}</strong>
-                </p>
-                <p style={{ fontSize: "12px", marginTop: "4px" }}>
-                  ※ざっくりとした目安です。正確な位置情報の共有は行いません。
-                </p>
-                <p
-                  style={{
-                    fontSize: 10,
-                    opacity: 0.6,
-                    marginTop: "4px",
-                  }}
-                >
-                  debug: distanceKm ={" "}
-                  {distanceKm != null ? distanceKm.toFixed(3) : "null"},{" "}
-                  bearing ={" "}
-                  {bearingDeg != null ? bearingDeg.toFixed(1) : "null"},{" "}
-                  deviceHeading ={" "}
-                  {deviceHeading != null
-                    ? deviceHeading.toFixed(1)
-                    : "null"}
-                </p>
-              </div>
-
-              {/* コンパスUI */}
-              <div className="compass-wrapper">
-                <div className="compass-circle">
-                  <div
-                    className="compass-needle"
-                    style={{
-                      transform: `translate(-50%, -50%) rotate(${compassNeedleDeg}deg)`,
-                    }}
-                  />
-                  <div className="compass-center-dot" />
-                  <div className="compass-n-label">N</div>
-                </div>
-              </div>
-            </>
-          )}
-        </section>
-
-        {/* 自分の調子 */}
-        <section className="section-block">
-          <h2>きょうの自分の調子</h2>
-          <div className="mood-row">
-            <button
-              className={currentMood === "good" ? "mood-active" : ""}
-              onClick={() => handleMoodClick("good")}
-            >
-              😄
-            </button>
-            <button
-              className={currentMood === "ok" ? "mood-active" : ""}
-              onClick={() => handleMoodClick("ok")}
-            >
-              🙂
-            </button>
-            <button
-              className={currentMood === "tired" ? "mood-active" : ""}
-              onClick={() => handleMoodClick("tired")}
-            >
-              😌
-            </button>
-            <button
-              className={currentMood === "bad" ? "mood-active" : ""}
-              onClick={() => handleMoodClick("bad")}
-            >
-              😢
-            </button>
-          </div>
-          <p>
-            タップした調子が、pair touch 上で相手にも共有されるようにしていくよ。
-          </p>
-        </section>
-
-        {/* 相手の調子 */}
-        <section className="section-block">
-          <h2>相手のきょうの調子</h2>
-
-          {!pairId && <p>ペアがまだ設定されていません。</p>}
-
-          {pairId && !partnerUid && (
-            <p>まだ相手がこの招待コードで参加していないようです。</p>
-          )}
-
-          {pairId && partnerUid && (
-            <>
-              {partnerMood ? (
+          <div style={styles.card}>
+            <p style={styles.sectionTitle}>いまの距離感</p>
+            <p style={styles.mainText}>
+              {paired ? (
                 <>
-                  <p>{partnerName || "相手"} のいまの調子：</p>
-                  <div className="mood-row">
-                    <span style={{ fontSize: "28px" }}>
-                      {renderMoodEmoji(partnerMood)}
-                    </span>
-                  </div>
-                  <p style={{ fontSize: "13px" }}>
-                    相手がアイコンを変えると、ここも自動で変わります。
-                  </p>
+                  相手は <strong>{state?.directionText}</strong> の方角に、<br />
+                  <strong>{state?.distanceText}</strong> くらい。
                 </>
               ) : (
-                <p>相手はまだ今日の調子を選んでいません。</p>
+                <>まだペアができていません（招待コードでペアリングしてください）</>
               )}
-            </>
-          )}
-        </section>
-      </main>
+            </p>
+            {state?.lastUpdatedAt && <p style={styles.subText}>最終更新：{state.lastUpdatedAt}</p>}
+
+            <button style={styles.button} onClick={handleUpdateLocation} disabled={busy}>
+              {busy ? "更新中…" : "いまの距離を更新する"}
+            </button>
+          </div>
+
+          <div style={styles.card}>
+            <p style={styles.sectionTitle}>きょうの調子</p>
+            <div style={styles.moodRow}>
+              {MOOD_OPTIONS.map((m) => (
+                <button
+                  key={m.key}
+                  style={{
+                    ...styles.moodButton,
+                    ...(myMood === m.key ? styles.moodButtonActive : {}),
+                  }}
+                  onClick={() => handleSelectMood(m.key)}
+                >
+                  <span style={{ fontSize: "1.4rem" }}>{m.emoji}</span>
+                  <span style={{ fontSize: "0.75rem", marginTop: 4 }}>{m.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={styles.cardSmall}>
+            <p style={styles.sectionTitleSmall}>相手のようす</p>
+            {paired ? (
+              <>
+                <p style={styles.subText}>
+                  きょうの調子：<strong>{renderMood(state?.partnerMood)}</strong>
+                </p>
+                <p style={styles.subText}>
+                  最後に開いた：{state?.partnerLastOpenedAt || "----"}
+                </p>
+              </>
+            ) : (
+              <p style={styles.subText}>ペアになると表示されます。</p>
+            )}
+          </div>
+
+          <div style={styles.card}>
+            <p style={styles.sectionTitle}>ペアリング</p>
+
+            {!paired && (
+              <>
+                <button style={styles.buttonOutline} onClick={handleCreateInvite} disabled={busy}>
+                  招待コードを作る（LINEで送る）
+                </button>
+
+                {inviteMessage && (
+                  <div style={{ marginTop: 10 }}>
+                    <pre style={styles.pre}>{inviteMessage}</pre>
+                    <button
+                      style={styles.buttonOutline}
+                      onClick={() => copyToClipboard(inviteMessage)}
+                    >
+                      招待文面をコピー
+                    </button>
+                  </div>
+                )}
+
+                <div style={{ marginTop: 12 }}>
+                  <input
+                    style={styles.input}
+                    placeholder="招待コード（例：ABCD-EFGH）"
+                    value={inviteInput}
+                    onChange={(e) => setInviteInput(e.target.value)}
+                  />
+                  <button style={styles.button} onClick={handleAcceptInvite} disabled={busy}>
+                    招待コードでペアになる
+                  </button>
+                </div>
+              </>
+            )}
+
+            {paired && (
+              <>
+                <p style={styles.subText}>ペア解除はいつでもできます。</p>
+                <button style={styles.danger} onClick={handleUnpair} disabled={busy}>
+                  ペア解除
+                </button>
+              </>
+            )}
+          </div>
+
+          <button style={styles.buttonOutline} onClick={handleResetDevice}>
+            この端末の鍵をリセット（デバッグ）
+          </button>
+        </>
+      )}
     </div>
   );
 }
 
-export default App;
+function renderMood(moodKey) {
+  const m = MOOD_OPTIONS.find((x) => x.key === moodKey);
+  return m ? `${m.emoji} ${m.label}` : "----";
+}
+
+const styles = {
+  container: {
+    minHeight: "100vh",
+    padding: "24px 16px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "16px",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif',
+    background: "#f5f5f7",
+  },
+  title: { fontSize: "1.6rem", margin: "8px 0 10px" },
+  card: {
+    width: "100%",
+    maxWidth: 420,
+    padding: "16px 18px",
+    borderRadius: 16,
+    background: "#fff",
+    boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
+  },
+  cardSmall: {
+    width: "100%",
+    maxWidth: 420,
+    padding: "12px 14px",
+    borderRadius: 12,
+    background: "#fff",
+    boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+  },
+  sectionTitle: { fontSize: "1rem", marginBottom: 6 },
+  sectionTitleSmall: { fontSize: "0.95rem", marginBottom: 4 },
+  mainText: { fontSize: "0.95rem", lineHeight: 1.6 },
+  subText: { fontSize: "0.8rem", color: "#555", marginTop: 4, lineHeight: 1.5 },
+  button: {
+    marginTop: 10,
+    padding: "10px 16px",
+    borderRadius: 999,
+    border: "none",
+    fontSize: "0.95rem",
+    cursor: "pointer",
+    background: "#4285F4",
+    color: "#fff",
+  },
+  buttonOutline: {
+    marginTop: 10,
+    padding: "8px 14px",
+    borderRadius: 999,
+    border: "1px solid #ccc",
+    fontSize: "0.85rem",
+    cursor: "pointer",
+    background: "#fff",
+    color: "#333",
+  },
+  danger: {
+    marginTop: 10,
+    padding: "10px 16px",
+    borderRadius: 999,
+    border: "none",
+    fontSize: "0.95rem",
+    cursor: "pointer",
+    background: "#d33",
+    color: "#fff",
+  },
+  errorBox: {
+    padding: "8px 12px",
+    borderRadius: 8,
+    background: "#ffecec",
+    color: "#c00",
+    fontSize: "0.85rem",
+    maxWidth: 420,
+  },
+  moodRow: { display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" },
+  moodButton: {
+    flex: "1 1 20%",
+    minWidth: 60,
+    padding: "6px 4px",
+    borderRadius: 999,
+    border: "1px solid #ddd",
+    background: "#fff",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    cursor: "pointer",
+  },
+  moodButtonActive: { borderColor: "#4285F4", background: "#e8f0fe" },
+  input: {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "8px 10px",
+    marginTop: 8,
+    borderRadius: 8,
+    border: "1px solid #ccc",
+    fontSize: "0.9rem",
+  },
+  pre: {
+    background: "#f6f6f6",
+    padding: 10,
+    borderRadius: 8,
+    whiteSpace: "pre-wrap",
+    margin: 0,
+  },
+};
