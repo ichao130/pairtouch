@@ -1,11 +1,8 @@
-// src/firebase.js
-
+// firebase.js
 import { initializeApp } from "firebase/app";
-import { getAuth, GoogleAuthProvider } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
-import { getMessaging, isSupported } from "firebase/messaging";
+import { getAuth } from "firebase/auth";
 
-// Firebase 設定（あなたのやつ）
+// 🔧 Firebase コンソールからコピーして置き換えてください
 const firebaseConfig = {
   apiKey: "AIzaSyDGcGIuL0SoH2EdcgrBeIpAKkHNOqpq4G0",
   authDomain: "pairtouch-61a68.firebaseapp.com",
@@ -17,25 +14,6 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
 
-// Firestore（named DB）
-export const db = getFirestore(app, "pairtouch01");
-
-// Auth
-export const auth = getAuth(app);
-export const googleProvider = new GoogleAuthProvider();
-
-/**
- * ここ重要！
- * await をトップレベルで使わず、関数を使って messaging を返す
- */
-export const getMessagingIfSupported = async () => {
-  try {
-    const supported = await isSupported();
-    if (!supported) return null;
-    return getMessaging(app);
-  } catch (e) {
-    console.error("isSupported チェックでエラー:", e);
-    return null;
-  }
-};
+export { app, auth };

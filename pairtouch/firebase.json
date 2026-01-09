@@ -17,12 +17,11 @@
     ],
     // PWA / SPA の場合、URLは全部 index.html にリライト
     "rewrites": [
-      {
-        "source": "**",
-        "destination": "/index.html"
-      }
+      { "source": "api/**", "function": "api" },
+      { "source": "**", "destination": "/index.html" }
     ]
   },
+  
 
   // Cloud Functions
   "functions": [
