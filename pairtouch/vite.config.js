@@ -7,7 +7,12 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.js',
+
       registerType: 'autoUpdate',
+
       includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'masked-icon.svg'],
       manifest: {
         name: 'pair touch',
@@ -16,27 +21,13 @@ export default defineConfig({
         display: 'standalone',
         theme_color: '#ffffff',
         icons: [
-          {
-            src: '/icon-192x192.png',
-            sizes: '192x192',
-            type: 'image/png',
-          },
-          {
-            src: '/icon-512x512.png',
-            sizes: '512x512',
-            type: 'image/png',
-          },
+          { src: '/icon-192x192.png', sizes: '192x192', type: 'image/png' },
+          { src: '/icon-512x512.png', sizes: '512x512', type: 'image/png' },
         ],
       },
 
-      // 🔽 ここがポイント
-      workbox: {
-        // デフォルトで /index.html にフォールバックする設定をしている場合でも、
-        // Firebase Auth のパスだけは SW の管轄外にする
-        navigateFallbackDenylist: [
-          /\/__\/auth\//,   // Firebase Auth が使うパスを除外
-        ],
-      },
+      // （任意）開発中にSWを有効化したいなら
+      // devOptions: { enabled: true },
     }),
   ],
 })

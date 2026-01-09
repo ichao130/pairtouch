@@ -1,534 +1,604 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { getDeviceKey, setDeviceKey, clearDeviceKey } from "./deviceStore";
-import { apiGet, apiPost } from "./api";
-import { setupPushAndRegisterToken } from "./push";
+// src/App.jsx
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { getDeviceKey, setDeviceKey, clearDeviceKey } from './deviceStore';
+import { apiGet, apiPost } from './api';
+import { setupPushAndRegisterToken } from './push';
 
-
-
-const MOOD_OPTIONS = [
-  { key: "great", label: "いいかんじ", emoji: "🙂" },
-  { key: "ok", label: "ふつう", emoji: "😐" },
-  { key: "tired", label: "つかれ気味", emoji: "😵" },
-  { key: "bad", label: "しんどい", emoji: "😣" },
-];
-
-const openedOnceRef = useRef(false);
-
-function copyToClipboard(text) {
-  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
-  // fallback
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand("copy");
-  document.body.removeChild(ta);
-  return Promise.resolve();
+function nowJstString() {
+  const d = new Date();
+  return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(
+    d.getDate(),
+  ).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(
+    2,
+    '0',
+  )}`;
 }
 
+const MOODS = [
+  { key: 'good', label: '🙂 good' },
+  { key: 'ok', label: '😐 ok' },
+  { key: 'tired', label: '🥱 tired' },
+  { key: 'sad', label: '😢 sad' },
+];
 
-async function handleEnablePush() {
-  try {
-    const r = await setupPushAndRegisterToken();
-    if (!r.enabled) alert(`Push無効：${r.reason}`);
-    else alert("Pushを有効化しました！");
-  } catch (e) {
-    console.error(e);
-    alert("Push設定に失敗しました");
-  }
+function normalizeRecoveryCode(raw) {
+  return (raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/[^A-Z0-9-]/g, '');
 }
 
 export default function App() {
-  const [booting, setBooting] = useState(true);
-  const [hasKey, setHasKey] = useState(false);
+  // ----- deviceKey -----
+  const [deviceKey, setDeviceKeyState] = useState(null);
+  const [loadingKey, setLoadingKey] = useState(true);
 
-  // 初回登録/復旧で表示するコード
-  const [recoveryCodeShown, setRecoveryCodeShown] = useState(null);
-
-  // 状態
+  // ----- state -----
   const [state, setState] = useState(null);
-  const [uiError, setUiError] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [stateLoading, setStateLoading] = useState(false);
+  const [stateError, setStateError] = useState(null);
 
-  // 招待
-  const [inviteMessage, setInviteMessage] = useState(null);
-  const [inviteInput, setInviteInput] = useState("");
+  // ----- pairing -----
+  const [inviteInfo, setInviteInfo] = useState(null); // { inviteCode, message }
+  const [inviteInput, setInviteInput] = useState('');
+  const [pairingMsg, setPairingMsg] = useState('');
 
-  // 調子
-  const myMood = state?.myMood ?? null;
+  // ----- location -----
+  const [geoMsg, setGeoMsg] = useState('');
+  const [myMood, setMyMood] = useState('ok');
 
-  // 起動時に deviceKey を確認
+  // ----- push -----
+  const [pushResult, setPushResult] = useState(null);
+
+  // ----- opened -----
+  const openedSentRef = useRef(false);
+
+  // ----- recovery (NEW) -----
+  const [showRecovery, setShowRecovery] = useState(false);
+  const [recoveryInput, setRecoveryInput] = useState('');
+  const [recoveryMsg, setRecoveryMsg] = useState('');
+  const [recovering, setRecovering] = useState(false);
+
+  // 初期：deviceKey 読み込み
   useEffect(() => {
     (async () => {
-      const k = await getDeviceKey();
-      setHasKey(!!k);
-      setBooting(false);
+      setLoadingKey(true);
+      try {
+        const k = await getDeviceKey();
+        setDeviceKeyState(k || null);
+      } finally {
+        setLoadingKey(false);
+      }
     })();
   }, []);
 
+  const hasKey = useMemo(() => !!deviceKey, [deviceKey]);
+
+  // 起動時：鍵があるなら opened を1回だけ送る
   useEffect(() => {
     if (!hasKey) return;
-    if (openedOnceRef.current) return;
-
-    openedOnceRef.current = true;
-
-    apiPost("/api/opened").catch(console.error);
+    if (openedSentRef.current) return;
+    openedSentRef.current = true;
+    apiPost('/api/opened').catch((e) => console.error('opened failed', e));
   }, [hasKey]);
 
-  // deviceKey あるなら state 読みにいく（+ opened 1回）
-  const openedOnceRef = useRef(false);
+  // state 取得
+  const refreshState = async () => {
+    setStateLoading(true);
+    setStateError(null);
+    try {
+      const s = await apiGet('/api/state');
+      setState(s);
+      if (s?.myMood) setMyMood(s.myMood);
+    } catch (e) {
+      console.error('state error', e);
+      setStateError(String(e?.message || e));
+    } finally {
+      setStateLoading(false);
+    }
+  };
+
+  // 鍵があるなら初回 state を取得
   useEffect(() => {
     if (!hasKey) return;
-
-    (async () => {
-      try {
-        setUiError(null);
-        const s = await apiGet("/api/state");
-        setState(s);
-
-        if (!openedOnceRef.current) {
-          openedOnceRef.current = true;
-          await apiPost("/api/opened");
-        }
-      } catch (e) {
-        console.error(e);
-        setUiError("データ取得に失敗しました（Functions/Hosting接続も確認してね）");
-      }
-    })();
+    refreshState().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasKey]);
 
-  // ===== 登録（deviceKey発行） =====
-  async function handleRegister() {
-    try {
-      setBusy(true);
-      setUiError(null);
-      const resp = await fetch("/api/registerDevice", { method: "POST" }).then((r) => r.json());
-      await setDeviceKey(resp.deviceKey);
-      setRecoveryCodeShown(resp.recoveryCode);
-      setHasKey(true);
-    } catch (e) {
-      console.error(e);
-      setUiError("登録に失敗しました");
-    } finally {
-      setBusy(false);
-    }
+  // ----- actions -----
+
+const handleRegisterDevice = async () => {
+  setPairingMsg('');
+  try {
+    const res = await apiPost('/api/registerDevice');
+    const newKey = res?.deviceKey;
+    if (!newKey) throw new Error('recoverDevice: deviceKey missing');
+
+    await setDeviceKey(newKey);
+    setDeviceKeyState(newKey);
+
+    console.log('[deviceKey saved]', newKey.slice(0, 6) + '...');
+    console.log('[deviceKey in store]', await getDeviceKey());
+    alert(`登録できたよ\n\nrecoveryCode: ${res.recoveryCode}\n\n（メモってね）`);
+    await refreshState();
+  } catch (e) {
+    console.error(e);
+    alert(`登録に失敗: ${String(e?.message || e)}`);
   }
-
-  // ===== 復旧（recovery code） =====
-  async function handleRecover() {
-    try {
-      const code = prompt("復旧コード（XXXX-XXXX-XXXX）を入力してください");
-      if (!code) return;
-      setBusy(true);
-      setUiError(null);
-      const resp = await fetch("/api/recoverDevice", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recoveryCode: code }),
-      }).then(async (r) => {
-        if (!r.ok) throw new Error("recover failed");
-        return await r.json();
-      });
-
-      await setDeviceKey(resp.deviceKey);
-      setRecoveryCodeShown(resp.recoveryCode);
-      setHasKey(true);
-    } catch (e) {
-      console.error(e);
-      setUiError("復旧に失敗しました（コードが違う/無効の可能性）");
-    } finally {
-      setBusy(false);
-    }
-  }
+};
 
 
 
-  // ===== 招待コード作成 =====
-  async function handleCreateInvite() {
-    try {
-      setBusy(true);
-      setUiError(null);
-      const resp = await apiPost("/api/createInvite", {});
-      setInviteMessage(resp.message);
-    } catch (e) {
-      console.error(e);
-      setUiError("招待コード作成に失敗しました");
-    } finally {
-      setBusy(false);
-    }
-  }
 
-  // ===== 招待コード受け取り =====
-  async function handleAcceptInvite() {
-    try {
-      setBusy(true);
-      setUiError(null);
-      const resp = await apiPost("/api/acceptInvite", { inviteCode: inviteInput });
-      // ペアができたので state 再取得
-      const s = await apiGet("/api/state");
-      setState(s);
-      setInviteInput("");
-      setInviteMessage(null);
-    } catch (e) {
-      console.error(e);
-      setUiError("招待コードの受け取りに失敗しました（期限切れ/使用済み/ミス）");
-    } finally {
-      setBusy(false);
-    }
-  }
+  // NEW: 復旧コードで復元
+  const handleRecoverDevice = async () => {
+    setRecoveryMsg('');
+    const code = normalizeRecoveryCode(recoveryInput);
 
-  // ===== 解除 =====
-  async function handleUnpair() {
-    try {
-      setBusy(true);
-      setUiError(null);
-      await apiPost("/api/unpair", {});
-      const s = await apiGet("/api/state");
-      setState(s);
-      setInviteMessage(null);
-    } catch (e) {
-      console.error(e);
-      setUiError("解除に失敗しました");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // ===== 調子更新 =====
-  async function handleSelectMood(moodKey) {
-    try {
-      setUiError(null);
-      setState((prev) => ({ ...(prev || {}), myMood: moodKey }));
-      await apiPost("/api/updateMood", { mood: moodKey });
-    } catch (e) {
-      console.error(e);
-      setUiError("調子の更新に失敗しました");
-    }
-  }
-
-  // ===== 距離更新（位置送信） =====
-  async function handleUpdateLocation() {
-    if (!("geolocation" in navigator)) {
-      setUiError("この端末では位置情報が利用できません");
+    if (!code) {
+      setRecoveryMsg('復旧コードを入力してね');
       return;
     }
-    setBusy(true);
-    setUiError(null);
 
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        try {
-          const { latitude, longitude } = pos.coords;
-          const s = await apiPost("/api/updateLocation", {
-            lat: latitude,
-            lng: longitude,
-            mood: myMood,
-          });
-          setState(s);
-        } catch (e) {
-          console.error(e);
-          setUiError("位置情報の送信に失敗しました");
-        } finally {
-          setBusy(false);
-        }
-      },
-      (err) => {
-        console.error(err);
-        setUiError(err.code === 1 ? "位置情報が許可されていません" : "位置情報の取得に失敗しました");
-        setBusy(false);
-      },
-      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 15_000 }
+    setRecovering(true);
+    try {
+      // ここは Functions 側の実装に合わせて path/field 名を揃える
+      const res = await apiPost('/api/recoverDevice', { recoveryCode: code });
+
+      if (!res?.deviceKey) {
+        throw new Error('recoverDevice: deviceKey missing');
+      }
+
+      await setDeviceKey(res.deviceKey);
+      setDeviceKeyState(res.deviceKey);
+
+      // recoveryCode をローテーションする設計なら、ここで新コードを表示してもOK
+      if (res?.recoveryCode) {
+        alert(`復元できたよ\n\n新しいrecoveryCode: ${res.recoveryCode}\n\n（メモってね）`);
+      } else {
+        alert('復元できたよ');
+      }
+      
+
+      setShowRecovery(false);
+      setRecoveryInput('');
+      setRecoveryMsg('');
+      openedSentRef.current = false; // 新鍵で opened を送りたいのでリセット
+      await refreshState();
+    } catch (e) {
+      console.error(e);
+      setRecoveryMsg('復旧に失敗しました（コードが違う / 失効 / 既に無効化 など）');
+    } finally {
+      setRecovering(false);
+    }
+  };
+
+
+  const handleResetDeviceKey = async () => {
+    const ok = confirm('この端末の鍵を削除してログアウトします。よろしい？');
+    if (!ok) return;
+    await clearDeviceKey();
+    setDeviceKeyState(null);
+    setState(null);
+    setInviteInfo(null);
+    setInviteInput('');
+    setPairingMsg('');
+    setPushResult(null);
+    openedSentRef.current = false;
+
+    // recovery UI reset
+    setShowRecovery(false);
+    setRecoveryInput('');
+    setRecoveryMsg('');
+    setRecovering(false);
+  };
+
+  const handleCreateInvite = async () => {
+    setPairingMsg('');
+    try {
+      const res = await apiPost('/api/createInvite');
+      setInviteInfo(res);
+      setPairingMsg('招待コードを発行したよ。LINEで送ってね。');
+    } catch (e) {
+      console.error(e);
+      setPairingMsg(`招待コード作成に失敗: ${String(e?.message || e)}`);
+    }
+  };
+
+  const handleAcceptInvite = async () => {
+    setPairingMsg('');
+    const code = (inviteInput || '').trim().toUpperCase();
+    if (!code) {
+      setPairingMsg('招待コードを入力してね');
+      return;
+    }
+    try {
+      const res = await apiPost('/api/acceptInvite', { inviteCode: code });
+      setPairingMsg(`ペアに参加したよ（pairId: ${res?.pairId || 'OK'}）`);
+      setInviteInfo(null);
+      setInviteInput('');
+      await refreshState();
+    } catch (e) {
+      console.error(e);
+      setPairingMsg('招待コードの受け取りに失敗しました（期限切れ/使用済み/入力ミス）');
+    }
+  };
+
+  const handleUpdateLocation = async () => {
+    setGeoMsg('');
+    try {
+      if (!('geolocation' in navigator)) {
+        setGeoMsg('この端末は位置情報が使えないみたい');
+        return;
+      }
+
+      const pos = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: false,
+          timeout: 15000,
+          maximumAge: 60_000,
+        });
+      });
+
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+
+      const res = await apiPost('/api/updateLocation', { lat, lng, mood: myMood });
+      setState(res);
+      setGeoMsg(`位置を更新したよ（${nowJstString()}）`);
+    } catch (e) {
+      console.error(e);
+      setGeoMsg(`位置更新に失敗: ${String(e?.message || e)}`);
+    }
+  };
+
+  const handleEnablePush = async () => {
+    try {
+      const r = await setupPushAndRegisterToken();
+      setPushResult(r);
+      alert(JSON.stringify(r));
+      console.log('push result:', r);
+    } catch (e) {
+      console.error('push error', e);
+      alert(String(e?.message || e));
+    }
+  };
+
+  // ----- render -----
+
+  if (loadingKey) {
+    return (
+      <div style={styles.wrap}>
+        <h1 style={styles.h1}>pairtouch</h1>
+        <div style={styles.card}>読み込み中…</div>
+      </div>
     );
   }
 
-  // ===== deviceKey 破棄（デバッグ用） =====
-  async function handleResetDevice() {
-    await clearDeviceKey();
-    setHasKey(false);
-    setState(null);
-    setInviteMessage(null);
-    setInviteInput("");
-    setRecoveryCodeShown(null);
-    openedOnceRef.current = false;
-  }
+  // 鍵が無い：登録/復旧
+  if (!hasKey) {
+    return (
+      <div style={styles.wrap}>
+        <h1 style={styles.h1}>pairtouch</h1>
 
-  const paired = !!state?.paired;
-
-  if (booting) {
-    return <div style={styles.container}>起動中…</div>;
-  }
-
-  return (
-    <div style={styles.container}>
-      <h1 style={styles.title}>pair distance（鍵運用版）</h1>
-
-      {uiError && <div style={styles.errorBox}>{uiError}</div>}
-
-      {!hasKey && (
         <div style={styles.card}>
-          <p style={styles.sectionTitle}>はじめに（端末登録）</p>
-          <p style={styles.subText}>
-            Googleログインなしで使うため、端末専用の「鍵」を作ります。
+          <div style={styles.title}>この端末を登録</div>
+          <p style={styles.p}>
+            端末ごとに「鍵」を作って、ペアリングするよ。<br />
+            （Googleログイン不要）
           </p>
 
-          <button style={styles.button} onClick={handleRegister} disabled={busy}>
-            {busy ? "処理中…" : "この端末を登録する"}
+          <button style={styles.btnPrimary} onClick={handleRegisterDevice}>
+            登録してはじめる
           </button>
 
-          <button style={styles.buttonOutline} onClick={handleRecover} disabled={busy}>
-            復旧コードで引き継ぐ
-          </button>
+          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.75 }}>
+            ※ 登録時に出る recoveryCode は、念のためメモ推奨
+          </div>
         </div>
-      )}
 
-      {hasKey && (
-        <>
-          {recoveryCodeShown && (
-            <div style={styles.card}>
-              <p style={styles.sectionTitle}>復旧コード（大事）</p>
-              <p style={styles.mainText}>
-                <strong>{recoveryCodeShown}</strong>
-              </p>
-              <p style={styles.subText}>
-                端末のストレージが消えた時に必要。LINEの自分宛メモに貼るのがオススメ。
-              </p>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div style={styles.card}>
+          <div style={styles.title}>復旧コードで復元</div>
+          <p style={styles.p}>
+            以前の端末でメモした recoveryCode がある場合は、ここから復元できるよ。
+          </p>
+
+          {!showRecovery ? (
+            <button
+              style={styles.btn}
+              onClick={() => {
+                setShowRecovery(true);
+                setRecoveryMsg('');
+              }}
+            >
+              復旧コードを入力する
+            </button>
+          ) : (
+            <>
+              <input
+                style={styles.input}
+                value={recoveryInput}
+                onChange={(e) => setRecoveryInput(e.target.value)}
+                placeholder="例）DDPX-T7XY-B2UB"
+                autoCapitalize="characters"
+                autoCorrect="off"
+              />
+
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                 <button
-                  style={styles.buttonOutline}
-                  onClick={() => copyToClipboard(recoveryCodeShown)}
+                  style={styles.btnPrimary}
+                  onClick={handleRecoverDevice}
+                  disabled={recovering}
                 >
-                  コードだけコピー
+                  {recovering ? '復元中…' : '復元する'}
                 </button>
                 <button
-                  style={styles.buttonOutline}
-                  onClick={() =>
-                    copyToClipboard(
-                      `復旧コード：${recoveryCodeShown}\n（pair distance）`
-                    )
-                  }
+                  style={styles.btn}
+                  onClick={() => {
+                    setShowRecovery(false);
+                    setRecoveryInput('');
+                    setRecoveryMsg('');
+                  }}
                 >
-                  文面コピー
-                </button>
-                <button style={styles.buttonOutline} onClick={() => setRecoveryCodeShown(null)}>
-                  了解（非表示）
+                  キャンセル
                 </button>
               </div>
-            </div>
+
+              {recoveryMsg && <div style={styles.err}>{recoveryMsg}</div>}
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+                ※ 復元できたら、新しい端末鍵が保存されます
+              </div>
+            </>
           )}
+        </div>
+      </div>
+    );
+  }
 
-          <div style={styles.card}>
-            <p style={styles.sectionTitle}>いまの距離感</p>
-            <p style={styles.mainText}>
-              {paired ? (
-                <>
-                  相手は <strong>{state?.directionText}</strong> の方角に、<br />
-                  <strong>{state?.distanceText}</strong> くらい。
-                </>
-              ) : (
-                <>まだペアができていません（招待コードでペアリングしてください）</>
-              )}
-            </p>
-            {state?.lastUpdatedAt && <p style={styles.subText}>最終更新：{state.lastUpdatedAt}</p>}
+  // 鍵あり：メイン
+  return (
+    <div style={styles.wrap}>
+      <h1 style={styles.h1}>pairtouch</h1>
 
-            <button style={styles.button} onClick={handleUpdateLocation} disabled={busy}>
-              {busy ? "更新中…" : "いまの距離を更新する"}
+      {/* 状態 */}
+      <div style={styles.card}>
+        <div style={styles.rowBetween}>
+          <div style={styles.title}>いまの状態</div>
+          <button style={styles.btn} onClick={refreshState} disabled={stateLoading}>
+            {stateLoading ? '更新中…' : '更新'}
+          </button>
+        </div>
+
+        {stateError && <div style={styles.err}>state error: {stateError}</div>}
+
+        <div style={styles.kpiRow}>
+          <div style={styles.kpi}>
+            <div style={styles.kpiLabel}>距離</div>
+            <div style={styles.kpiValue}>{state?.distanceText ?? '----'}</div>
+          </div>
+          <div style={styles.kpi}>
+            <div style={styles.kpiLabel}>方角</div>
+            <div style={styles.kpiValue}>{state?.directionText ?? '----'}</div>
+          </div>
+        </div>
+
+        <div style={styles.metaRow}>
+          <div>paired: {String(state?.paired ?? false)}</div>
+          <div>pairId: {state?.pairId ?? '----'}</div>
+        </div>
+
+        <div style={styles.metaRow}>
+          <div>myMood: {state?.myMood ?? '----'}</div>
+          <div>partnerMood: {state?.partnerMood ?? '----'}</div>
+        </div>
+
+        <div style={styles.metaRow}>
+          <div>lastUpdatedAt: {state?.lastUpdatedAt ?? '----'}</div>
+          <div>partnerLastOpenedAt: {state?.partnerLastOpenedAt ?? '----'}</div>
+        </div>
+      </div>
+
+      {/* ペアリング */}
+      <div style={styles.card}>
+        <div style={styles.title}>ペアリング</div>
+
+        <div style={styles.row}>
+          <button style={styles.btnPrimary} onClick={handleCreateInvite}>
+            招待コードを発行
+          </button>
+        </div>
+
+        {inviteInfo?.inviteCode && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>招待コード</div>
+            <div style={styles.codeBox}>{inviteInfo.inviteCode}</div>
+            <textarea style={styles.textarea} value={inviteInfo.message || ''} readOnly rows={3} />
+          </div>
+        )}
+
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>招待コードを入力して参加</div>
+          <div style={styles.row}>
+            <input
+              style={styles.input}
+              value={inviteInput}
+              onChange={(e) => setInviteInput(e.target.value)}
+              placeholder="例）VZYZ-PVNX"
+              autoCapitalize="characters"
+              autoCorrect="off"
+            />
+            <button style={styles.btn} onClick={handleAcceptInvite}>
+              参加
             </button>
           </div>
+        </div>
 
-          <div style={styles.card}>
-            <p style={styles.sectionTitle}>きょうの調子</p>
-            <div style={styles.moodRow}>
-              {MOOD_OPTIONS.map((m) => (
-                <button
-                  key={m.key}
-                  style={{
-                    ...styles.moodButton,
-                    ...(myMood === m.key ? styles.moodButtonActive : {}),
-                  }}
-                  onClick={() => handleSelectMood(m.key)}
-                >
-                  <span style={{ fontSize: "1.4rem" }}>{m.emoji}</span>
-                  <span style={{ fontSize: "0.75rem", marginTop: 4 }}>{m.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+        {pairingMsg && <div style={styles.info}>{pairingMsg}</div>}
+      </div>
 
-          <div style={styles.cardSmall}>
-            <p style={styles.sectionTitleSmall}>相手のようす</p>
-            {paired ? (
-              <>
-                <p style={styles.subText}>
-                  きょうの調子：<strong>{renderMood(state?.partnerMood)}</strong>
-                </p>
-                <p style={styles.subText}>
-                  最後に開いた：{state?.partnerLastOpenedAt || "----"}
-                </p>
-              </>
-            ) : (
-              <p style={styles.subText}>ペアになると表示されます。</p>
-            )}
-          </div>
+      {/* 位置更新 + mood */}
+      <div style={styles.card}>
+        <div style={styles.title}>調子 & 位置更新</div>
 
-          <div style={styles.card}>
-            <p style={styles.sectionTitle}>ペアリング</p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+          {MOODS.map((m) => (
+            <button
+              key={m.key}
+              onClick={() => setMyMood(m.key)}
+              style={{
+                ...styles.pill,
+                borderColor: myMood === m.key ? '#111' : '#ddd',
+                background: myMood === m.key ? '#111' : '#fff',
+                color: myMood === m.key ? '#fff' : '#111',
+              }}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
 
-            {!paired && (
-              <>
-                <button style={styles.buttonOutline} onClick={handleCreateInvite} disabled={busy}>
-                  招待コードを作る（LINEで送る）
-                </button>
-
-                {inviteMessage && (
-                  <div style={{ marginTop: 10 }}>
-                    <pre style={styles.pre}>{inviteMessage}</pre>
-                    <button
-                      style={styles.buttonOutline}
-                      onClick={() => copyToClipboard(inviteMessage)}
-                    >
-                      招待文面をコピー
-                    </button>
-                  </div>
-                )}
-
-                <div style={{ marginTop: 12 }}>
-                  <input
-                    style={styles.input}
-                    placeholder="招待コード（例：ABCD-EFGH）"
-                    value={inviteInput}
-                    onChange={(e) => setInviteInput(e.target.value)}
-                  />
-                  <button style={styles.button} onClick={handleAcceptInvite} disabled={busy}>
-                    招待コードでペアになる
-                  </button>
-                </div>
-              </>
-            )}
-
-            {paired && (
-              <>
-                <p style={styles.subText}>ペア解除はいつでもできます。</p>
-                <button style={styles.danger} onClick={handleUnpair} disabled={busy}>
-                  ペア解除
-                </button>
-              </>
-            )}
-          </div>
-
-          <button style={styles.buttonOutline} onClick={handleResetDevice}>
-            この端末の鍵をリセット（デバッグ）
+        <div style={{ marginTop: 10 }}>
+          <button style={styles.btnPrimary} onClick={handleUpdateLocation}>
+            位置を更新する
           </button>
-        </>
-      )}
+          {geoMsg && <div style={styles.info}>{geoMsg}</div>}
+        </div>
+      </div>
+
+      {/* Push */}
+      <div style={styles.card}>
+        <div style={styles.rowBetween}>
+          <div style={styles.title}>Push通知</div>
+          <button style={styles.btn} onClick={handleEnablePush}>
+            通知ON（デバッグ）
+          </button>
+        </div>
+
+        <div style={styles.p}>
+          iOSは「ホーム画面のPWA」から起動して、このボタンを押す必要があるよ。
+        </div>
+
+        {pushResult && <pre style={styles.pre}>{JSON.stringify(pushResult, null, 2)}</pre>}
+      </div>
+
+      {/* 設定 */}
+      <div style={styles.card}>
+        <div style={styles.title}>設定</div>
+        <button style={styles.btnDanger} onClick={handleResetDeviceKey}>
+          この端末の鍵を削除（ログアウト）
+        </button>
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
+          deviceKey: <span style={{ fontFamily: 'monospace' }}>{deviceKey}</span>
+        </div>
+      </div>
     </div>
   );
 }
 
-function renderMood(moodKey) {
-  const m = MOOD_OPTIONS.find((x) => x.key === moodKey);
-  return m ? `${m.emoji} ${m.label}` : "----";
-}
-
 const styles = {
-  container: {
-    minHeight: "100vh",
-    padding: "24px 16px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "16px",
-    alignItems: "center",
-    justifyContent: "flex-start",
+  wrap: {
+    maxWidth: 520,
+    margin: '0 auto',
+    padding: '20px 14px 40px',
     fontFamily:
-      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif',
-    background: "#f5f5f7",
+      '-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,Apple Color Emoji,Segoe UI Emoji',
   },
-  title: { fontSize: "1.6rem", margin: "8px 0 10px" },
+  h1: { fontSize: 22, margin: '6px 0 14px' },
   card: {
-    width: "100%",
-    maxWidth: 420,
-    padding: "16px 18px",
-    borderRadius: 16,
-    background: "#fff",
-    boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
-  },
-  cardSmall: {
-    width: "100%",
-    maxWidth: 420,
-    padding: "12px 14px",
+    border: '1px solid #e7e7e7',
     borderRadius: 12,
-    background: "#fff",
-    boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+    padding: 14,
+    marginBottom: 12,
+    background: '#fff',
   },
-  sectionTitle: { fontSize: "1rem", marginBottom: 6 },
-  sectionTitleSmall: { fontSize: "0.95rem", marginBottom: 4 },
-  mainText: { fontSize: "0.95rem", lineHeight: 1.6 },
-  subText: { fontSize: "0.8rem", color: "#555", marginTop: 4, lineHeight: 1.5 },
-  button: {
-    marginTop: 10,
-    padding: "10px 16px",
-    borderRadius: 999,
-    border: "none",
-    fontSize: "0.95rem",
-    cursor: "pointer",
-    background: "#4285F4",
-    color: "#fff",
+  title: { fontWeight: 800, marginBottom: 6 },
+  p: { fontSize: 13, lineHeight: 1.5, opacity: 0.85, marginTop: 8 },
+  row: { display: 'flex', gap: 8, alignItems: 'center' },
+  rowBetween: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+  btn: {
+    padding: '10px 12px',
+    borderRadius: 10,
+    border: '1px solid #ddd',
+    background: '#fff',
+    cursor: 'pointer',
   },
-  buttonOutline: {
-    marginTop: 10,
-    padding: "8px 14px",
-    borderRadius: 999,
-    border: "1px solid #ccc",
-    fontSize: "0.85rem",
-    cursor: "pointer",
-    background: "#fff",
-    color: "#333",
+  btnPrimary: {
+    padding: '10px 12px',
+    borderRadius: 10,
+    border: '1px solid #111',
+    background: '#111',
+    color: '#fff',
+    cursor: 'pointer',
   },
-  danger: {
-    marginTop: 10,
-    padding: "10px 16px",
-    borderRadius: 999,
-    border: "none",
-    fontSize: "0.95rem",
-    cursor: "pointer",
-    background: "#d33",
-    color: "#fff",
+  btnDanger: {
+    padding: '10px 12px',
+    borderRadius: 10,
+    border: '1px solid #c62828',
+    background: '#fff',
+    color: '#c62828',
+    cursor: 'pointer',
   },
-  errorBox: {
-    padding: "8px 12px",
-    borderRadius: 8,
-    background: "#ffecec",
-    color: "#c00",
-    fontSize: "0.85rem",
-    maxWidth: 420,
-  },
-  moodRow: { display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" },
-  moodButton: {
-    flex: "1 1 20%",
-    minWidth: 60,
-    padding: "6px 4px",
-    borderRadius: 999,
-    border: "1px solid #ddd",
-    background: "#fff",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    cursor: "pointer",
-  },
-  moodButtonActive: { borderColor: "#4285F4", background: "#e8f0fe" },
   input: {
-    width: "100%",
-    boxSizing: "border-box",
-    padding: "8px 10px",
-    marginTop: 8,
-    borderRadius: 8,
-    border: "1px solid #ccc",
-    fontSize: "0.9rem",
+    flex: 1,
+    padding: '10px 12px',
+    borderRadius: 10,
+    border: '1px solid #ddd',
+    fontSize: 14,
   },
-  pre: {
-    background: "#f6f6f6",
+  textarea: {
+    width: '100%',
+    marginTop: 8,
     padding: 10,
-    borderRadius: 8,
-    whiteSpace: "pre-wrap",
-    margin: 0,
+    borderRadius: 10,
+    border: '1px solid #ddd',
+    fontSize: 13,
+  },
+  codeBox: {
+    fontFamily: 'monospace',
+    fontSize: 18,
+    fontWeight: 800,
+    letterSpacing: 1,
+    padding: '10px 12px',
+    borderRadius: 10,
+    border: '1px dashed #bbb',
+    display: 'inline-block',
+  },
+  info: { marginTop: 8, fontSize: 13, opacity: 0.9 },
+  err: { marginTop: 10, color: '#c62828', fontSize: 13 },
+  pre: {
+    marginTop: 10,
+    background: '#f7f7f7',
+    border: '1px solid #eee',
+    padding: 10,
+    borderRadius: 10,
+    fontSize: 12,
+    overflowX: 'auto',
+  },
+  kpiRow: { display: 'flex', gap: 10, marginTop: 10 },
+  kpi: {
+    flex: 1,
+    border: '1px solid #eee',
+    borderRadius: 12,
+    padding: 12,
+    background: '#fafafa',
+  },
+  kpiLabel: { fontSize: 12, opacity: 0.7 },
+  kpiValue: { fontSize: 22, fontWeight: 900, marginTop: 4 },
+  metaRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: 10,
+    fontSize: 12,
+    opacity: 0.8,
+    marginTop: 8,
+  },
+  pill: {
+    padding: '8px 10px',
+    borderRadius: 999,
+    border: '1px solid #ddd',
+    background: '#fff',
+    cursor: 'pointer',
+    fontSize: 13,
   },
 };
